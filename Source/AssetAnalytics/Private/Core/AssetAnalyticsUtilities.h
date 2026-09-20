@@ -21,6 +21,12 @@ namespace Core
 		return Value == INDEX_NONE ? FString() : FString::FromInt(Value);
 	}
 
+	/** Returns a 64-bit integer as CSV text, or an empty field when unavailable. */
+	inline FString CsvNumberOrEmpty(const int64 Value)
+	{
+		return Value < 0 ? FString() : LexToString(Value);
+	}
+
 	/** Returns a decimal as CSV text, or an empty field when unavailable. */
 	inline FString CsvNumberOrEmpty(const double Value)
 	{

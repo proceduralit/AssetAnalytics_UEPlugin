@@ -18,8 +18,10 @@
 #include "Misc/Paths.h"
 #include "PackageTools.h"
 #include "PhysicsEngine/BodySetup.h"
+#include "PhysicsEngine/PhysicsAsset.h"
 #include "PhysicsEngine/PhysicsSettings.h"
 #include "Rendering/SkeletalMeshRenderData.h"
+#include "ProfilingDebugging/ResourceSize.h"
 #include "UObject/UObjectGlobals.h"
 #include "Widgets/Notifications/SNotificationList.h"
 
@@ -39,6 +41,8 @@ namespace Mesh
 
 		FAssetData AssetData;
 		bool bIsSkeletalMesh = false;
+		int64 PackageDiskSize = -1;
+		int64 PhysicsSize = -1;
 		int32 LODCount = INDEX_NONE;
 		FString LODGroup;
 		FString CollisionComplexity;
@@ -107,6 +111,22 @@ namespace Mesh
 		Item.bIsSkeletalMesh = true;
 		if (Settings.bLODGroup) Item.LODGroup = TEXT("None");
 		if (Settings.bLODCount) Item.LODCount = SkeletalMesh.GetLODNum();
+		if (Settings.bPhysicsSize && Item.PhysicsSize < 0)
+		{
+			Item.PhysicsSize = 0;
+			if (UBodySetup* MeshBodySetup = SkeletalMesh.GetBodySetup())
+			{
+				FResourceSizeEx EstimatedSize(EResourceSizeMode::EstimatedTotal);
+				MeshBodySetup->GetResourceSizeEx(EstimatedSize);
+				Item.PhysicsSize += static_cast<int64>(EstimatedSize.GetTotalMemoryBytes());
+			}
+			if (UPhysicsAsset* PhysicsAsset = SkeletalMesh.GetPhysicsAsset())
+			{
+				FResourceSizeEx EstimatedSize(EResourceSizeMode::EstimatedTotal);
+				PhysicsAsset->GetResourceSizeEx(EstimatedSize);
+				Item.PhysicsSize += static_cast<int64>(EstimatedSize.GetTotalMemoryBytes());
+			}
+		}
 
 		const bool bGatherMaterialData =
 			Settings.bMaterialCount ||
@@ -145,6 +165,16 @@ namespace Mesh
 	{
 		if (Settings.bLODCount) Item.LODCount = StaticMesh.GetNumLODs();
 		if (Settings.bLODGroup) Item.LODGroup = StaticMesh.GetLODGroup().ToString();
+		if (Settings.bPhysicsSize && Item.PhysicsSize < 0)
+		{
+			Item.PhysicsSize = 0;
+			if (UBodySetup* BodySetup = StaticMesh.GetBodySetup())
+			{
+				FResourceSizeEx EstimatedSize(EResourceSizeMode::EstimatedTotal);
+				BodySetup->GetResourceSizeEx(EstimatedSize);
+				Item.PhysicsSize = static_cast<int64>(EstimatedSize.GetTotalMemoryBytes());
+			}
+		}
 		if (Settings.bCollisionInfo)
 		{
 			if (const UBodySetup* BodySetup = StaticMesh.GetBodySetup())
@@ -211,11 +241,22 @@ namespace Mesh
 
 	/** Fills Item with values cached in the Asset Registry. */
 	static void GatherAssetRegistryData(
+		IAssetRegistry& AssetRegistry,
 		const FAssetData& AssetData,
 		const UMeshAnalyticsSettings& Settings,
 		FMeshAssetData& Item)
 	{
 		Item.bIsSkeletalMesh = AssetData.AssetClassPath == USkeletalMesh::StaticClass()->GetClassPathName();
+		if (Settings.bPackageDiskSize)
+		{
+			FAssetPackageData PackageData;
+			if (AssetRegistry.TryGetAssetPackageData(AssetData.PackageName, PackageData) ==
+				UE::AssetRegistry::EExists::Exists)
+			{
+				Item.PackageDiskSize = PackageData.DiskSize;
+			}
+		}
+		if (Settings.bPhysicsSize) AssetData.GetTagValue(TEXT("PhysicsSize"), Item.PhysicsSize);
 		if (Settings.bLODCount) AssetData.GetTagValue(TEXT("LODs"), Item.LODCount);
 		if (Settings.bTriangleCount) AssetData.GetTagValue(TEXT("Triangles"), Item.TriangleCount);
 
@@ -259,6 +300,8 @@ namespace Mesh
 		const UMeshAnalyticsSettings& Settings)
 	{
 		const bool bIsSkeletalMesh = AssetData.AssetClassPath == USkeletalMesh::StaticClass()->GetClassPathName();
+		int64 CachedPhysicsSize = -1;
+		if (Settings.bPhysicsSize && !AssetData.GetTagValue(TEXT("PhysicsSize"), CachedPhysicsSize)) return true;
 		if (Settings.bTextureCount || Settings.bMaxTextureResolution) return true;
 		if (bIsSkeletalMesh)
 		{
@@ -272,12 +315,13 @@ namespace Mesh
 	 * Returns: The completed report row.
 	 */
 	static FMeshAssetData MakeMeshAssetData(
+		IAssetRegistry& AssetRegistry,
 		const FAssetData& AssetData,
 		UObject* MeshAsset,
 		const UMeshAnalyticsSettings& Settings)
 	{
 		FMeshAssetData Item(AssetData);
-		GatherAssetRegistryData(AssetData, Settings, Item);
+		GatherAssetRegistryData(AssetRegistry, AssetData, Settings, Item);
 		if (USkeletalMesh* SkeletalMesh = Cast<USkeletalMesh>(MeshAsset)) GatherSkeletalMeshData(*SkeletalMesh, Settings, Item);
 		else if (UStaticMesh* StaticMesh = Cast<UStaticMesh>(MeshAsset)) GatherStaticMeshData(*StaticMesh, Settings, Item);
 		return Item;
@@ -490,7 +534,7 @@ namespace Mesh
 					bWasPackageLoaded = FindPackage(nullptr, *AssetData.PackageName.ToString()) != nullptr;
 					MeshAsset = AssetData.GetAsset();
 				}
-				AssetItems.Add(MakeMeshAssetData(AssetData, MeshAsset, *Settings));
+				AssetItems.Add(MakeMeshAssetData(AssetRegistry, AssetData, MeshAsset, *Settings));
 				if (!bWasPackageLoaded && MeshAsset != nullptr) PackagesLoadedForReport.AddUnique(MeshAsset->GetOutermost());
 			}
 			UnloadReportPackages();
@@ -550,6 +594,7 @@ namespace Mesh
 			HeaderFields.Add(TEXT("AssetName"));
 			HeaderFields.Add(TEXT("PackagePath"));
 			HeaderFields.Add(TEXT("IsSkeletalMesh"));
+			if (Settings->bPackageDiskSize) HeaderFields.Add(TEXT("PackageDiskSize"));
 			if (Settings->bLODCount) HeaderFields.Add(TEXT("LODCount"));
 			if (Settings->bLODGroup) HeaderFields.Add(TEXT("LODGroup"));
 			if (Settings->bCollisionInfo)
@@ -557,6 +602,7 @@ namespace Mesh
 				HeaderFields.Add(TEXT("CollisionComplexity"));
 				HeaderFields.Add(TEXT("SimpleCollisionPrimitives"));
 			}
+			if (Settings->bPhysicsSize) HeaderFields.Add(TEXT("PhysicsSizeMB"));
 			if (Settings->bComplexCollisionInfo) HeaderFields.Add(TEXT("ComplexCollisionVertices"));
 			if (Settings->bTriangleCount) HeaderFields.Add(TEXT("LOD0Triangles"));
 			if (Settings->bMaterialCount) HeaderFields.Add(TEXT("MaterialSlots"));
@@ -573,12 +619,20 @@ namespace Mesh
 				RowFields.Add(Core::EscapeCsvField(Item.AssetData.AssetName.ToString()));
 				RowFields.Add(Core::EscapeCsvField(Item.AssetData.PackagePath.ToString()));
 				RowFields.Add(Item.bIsSkeletalMesh ? TEXT("True") : TEXT("False"));
+				if (Settings->bPackageDiskSize) RowFields.Add(Core::CsvNumberOrEmpty(Item.PackageDiskSize));
 				if (Settings->bLODCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.LODCount));
 				if (Settings->bLODGroup) RowFields.Add(Core::EscapeCsvField(Item.LODGroup));
 				if (Settings->bCollisionInfo)
 				{
 					RowFields.Add(Core::EscapeCsvField(Item.CollisionComplexity));
 					RowFields.Add(Core::CsvNumberOrEmpty(Item.SimpleCollisionPrimitives));
+				}
+				if (Settings->bPhysicsSize)
+				{
+					const double PhysicsSizeMB = Item.PhysicsSize < 0
+						? -1.0
+						: static_cast<double>(Item.PhysicsSize) / (1024.0 * 1024.0);
+					RowFields.Add(Core::CsvNumberOrEmpty(PhysicsSizeMB));
 				}
 				if (Settings->bComplexCollisionInfo) RowFields.Add(Core::CsvNumberOrEmpty(Item.ComplexCollisionVertices));
 				if (Settings->bTriangleCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.TriangleCount));

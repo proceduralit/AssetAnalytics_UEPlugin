@@ -17,10 +17,12 @@
     const reportBridgeUrl = "http://127.0.0.1:19842/asset-analytics/select";
 
     const preferredLabels = {
+        PackageDiskSize: "Package Disk Size (bytes)",
         LODCount: "LODs",
         LODGroup: "LOD Group",
         CollisionComplexity: "Collision Complexity",
         SimpleCollisionPrimitives: "Simple Collision Primitives",
+        PhysicsSizeMB: "Physics Size (MB)",
         ComplexCollisionVertices: "Complex Collision Verts",
         LOD0Triangles: "Number of Triangles",
         MaxBoundsLengthM: "Max Bound Length (m)",
