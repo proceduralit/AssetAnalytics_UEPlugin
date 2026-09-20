@@ -1,9 +1,5 @@
 # UE Plugin Coding Agent Instructions
 
-## Role
-
-You are helping write and maintain an Unreal Engine C++ plugin. Follow the existing code style, module layout, naming conventions, and Unreal Engine patterns already present in the project.
-
 ## Scope Control
 
 - Keep edits focused on what the user requested and what is necessary to complete it correctly.
