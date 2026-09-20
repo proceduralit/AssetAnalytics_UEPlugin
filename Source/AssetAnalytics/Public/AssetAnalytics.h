@@ -5,10 +5,6 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 
-class SDockTab;
-class FSpawnTabArgs;
-class FWorkspaceItem;
-
 namespace AssetAnalytics
 {
 namespace Core
@@ -26,12 +22,9 @@ public:
 	virtual void ShutdownModule() override;
 
 private:
-	/** Runs Mesh Analytics from Developer Tools and returns its temporary tab. */
-	TSharedRef<SDockTab> OnSpawnMeshAnalyticsReportTab(const FSpawnTabArgs& SpawnTabArgs);
+	/** Adds the direct Mesh Analytics action to the editor Window menu. */
+	void RegisterMenus();
 
 	/** Handles requests coming from the browser report. */
 	TUniquePtr<AssetAnalytics::Core::FAssetAnalyticsReportBridge> ReportBridge;
-
-	/** Asset Analytics group under Developer Tools. */
-	TSharedPtr<FWorkspaceItem> AssetAnalyticsMenuGroup;
 };

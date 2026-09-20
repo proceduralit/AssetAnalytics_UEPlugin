@@ -47,7 +47,6 @@ public class AssetAnalytics : ModuleRules
 				"HTTPServer",
 				"Sockets",
 				"ToolMenus",
-				"WorkspaceMenuStructure",
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);
