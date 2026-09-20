@@ -50,7 +50,7 @@ namespace Mesh
 		int32 MaxTextureResolution = INDEX_NONE;
 		double AverageTextureResolution = -1.0;
 		int32 UVChannelCount = INDEX_NONE;
-		int32 MinLightmapResolution = INDEX_NONE;
+		int32 LightmapResolution = INDEX_NONE;
 		double MaxBoundsLengthM = -1.0;
 	};
 
@@ -121,7 +121,6 @@ namespace Mesh
 		Item.bIsSkeletalMesh = true;
 		if (Settings.bLODGroup) Item.LODGroup = TEXT("None");
 		if (Settings.bLODCount) Item.LODCount = SkeletalMesh.GetLODNum();
-		if (Settings.bMinLightmapResolution) Item.MinLightmapResolution = 0;
 
 		const bool bGatherMaterialData =
 			Settings.bMaterialCount ||
@@ -220,13 +219,7 @@ namespace Mesh
 			const FVector BoundsSize = StaticMesh.GetBounds().BoxExtent * 2.0f;
 			Item.MaxBoundsLengthM = FMath::Max(BoundsSize.GetMax(), 1.0f) / 100.0;
 		}
-		if (Settings.bMinLightmapResolution && StaticMesh.IsSourceModelValid(0))
-		{
-			const FMeshBuildSettings& BuildSettings = StaticMesh.GetSourceModel(0).BuildSettings;
-			Item.MinLightmapResolution = BuildSettings.bGenerateLightmapUVs
-				? BuildSettings.MinLightmapResolution
-				: 0;
-		}
+		if (Settings.bLightmapResolution) Item.LightmapResolution = StaticMesh.GetLightMapResolution();
 		if ((Settings.bVertexCount || Settings.bUVChannelCount) &&
 			StaticMesh.HasValidRenderData(true, 0))
 		{
@@ -248,7 +241,6 @@ namespace Mesh
 		if (Item.bIsSkeletalMesh)
 		{
 			if (Settings.bLODGroup) Item.LODGroup = TEXT("None");
-			if (Settings.bMinLightmapResolution) Item.MinLightmapResolution = 0;
 			return;
 		}
 
@@ -291,7 +283,7 @@ namespace Mesh
 		{
 			return Settings.bMaterialCount || Settings.bUVChannelCount || Settings.bMaxBoundsLength;
 		}
-		return Settings.bComplexCollisionInfo || Settings.bMinLightmapResolution;
+		return Settings.bComplexCollisionInfo || Settings.bLightmapResolution;
 	}
 
 	/**
@@ -591,7 +583,7 @@ namespace Mesh
 			if (Settings->bMaxTextureResolution) HeaderFields.Add(TEXT("MaxTextureResolution"));
 			if (Settings->bAverageTextureResolution) HeaderFields.Add(TEXT("AverageTextureResolution"));
 			if (Settings->bUVChannelCount) HeaderFields.Add(TEXT("UVChannels"));
-			if (Settings->bMinLightmapResolution) HeaderFields.Add(TEXT("MinLightmapResolution"));
+			if (Settings->bLightmapResolution) HeaderFields.Add(TEXT("LightmapResolution"));
 			if (Settings->bMaxBoundsLength) HeaderFields.Add(TEXT("MaxBoundsLengthM"));
 
 			FString CsvData = FString::Join(HeaderFields, TEXT(",")) + TEXT("\r\n");
@@ -615,7 +607,7 @@ namespace Mesh
 				if (Settings->bMaxTextureResolution) RowFields.Add(Core::CsvNumberOrEmpty(Item.MaxTextureResolution));
 				if (Settings->bAverageTextureResolution) RowFields.Add(Core::CsvNumberOrEmpty(Item.AverageTextureResolution));
 				if (Settings->bUVChannelCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.UVChannelCount));
-				if (Settings->bMinLightmapResolution) RowFields.Add(Core::CsvNumberOrEmpty(Item.MinLightmapResolution));
+				if (Settings->bLightmapResolution) RowFields.Add(Core::CsvNumberOrEmpty(Item.LightmapResolution));
 				if (Settings->bMaxBoundsLength) RowFields.Add(Core::CsvNumberOrEmpty(Item.MaxBoundsLengthM));
 				CsvData += FString::Join(RowFields, TEXT(",")) + TEXT("\r\n");
 			}

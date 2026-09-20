@@ -27,7 +27,7 @@
         MaterialSlots: "Material Slots",
         UVChannels: "UV Channels",
         GenerateLightmapUVs: "Generate Lightmap UVs",
-        MinLightmapResolution: "Min Lightmap Resolution"
+        LightmapResolution: "Lightmap Resolution"
     };
 
     let rows = [];
