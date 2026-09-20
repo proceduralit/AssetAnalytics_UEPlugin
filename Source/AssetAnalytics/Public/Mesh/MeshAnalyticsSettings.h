@@ -60,6 +60,10 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
 	bool bTriangleCount = true;
 
+	/** Includes Nanite status, input triangle count, and static-mesh fallback percentage. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Nanite Info"))
+	bool bNaniteInfo = true;
+
 	/** Includes the material count in the generated CSV. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Material Count (Needs Asset Loading for Skeletal Meshes)"))
 	bool bMaterialCount = true;

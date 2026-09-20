@@ -44,11 +44,14 @@ namespace Mesh
 		int64 PackageDiskSize = -1;
 		int64 PhysicsSize = -1;
 		int32 LODCount = INDEX_NONE;
-		FString LODGroup;
+		FString LODGroup = TEXT("None");
 		FString CollisionComplexity;
 		int32 SimpleCollisionPrimitives = INDEX_NONE;
 		int32 ComplexCollisionVertices = INDEX_NONE;
 		int32 TriangleCount = INDEX_NONE;
+		bool bNaniteEnabled = false;
+		int32 NaniteTriangles = 0;
+		double NaniteFallbackPercent = 0.0;
 		int32 MaterialSlotCount = INDEX_NONE;
 		int32 TextureCount = INDEX_NONE;
 		int32 MaxTextureResolution = INDEX_NONE;
@@ -259,6 +262,15 @@ namespace Mesh
 		if (Settings.bPhysicsSize) AssetData.GetTagValue(TEXT("PhysicsSize"), Item.PhysicsSize);
 		if (Settings.bLODCount) AssetData.GetTagValue(TEXT("LODs"), Item.LODCount);
 		if (Settings.bTriangleCount) AssetData.GetTagValue(TEXT("Triangles"), Item.TriangleCount);
+		if (Settings.bNaniteInfo)
+		{
+			AssetData.GetTagValue(TEXT("NaniteEnabled"), Item.bNaniteEnabled);
+			AssetData.GetTagValue(TEXT("NaniteTriangles"), Item.NaniteTriangles);
+			if (!Item.bIsSkeletalMesh)
+			{
+				AssetData.GetTagValue(TEXT("NaniteFallbackPercent"), Item.NaniteFallbackPercent);
+			}
+		}
 
 		if (Item.bIsSkeletalMesh)
 		{
@@ -605,6 +617,12 @@ namespace Mesh
 			if (Settings->bPhysicsSize) HeaderFields.Add(TEXT("PhysicsSizeMB"));
 			if (Settings->bComplexCollisionInfo) HeaderFields.Add(TEXT("ComplexCollisionVertices"));
 			if (Settings->bTriangleCount) HeaderFields.Add(TEXT("LOD0Triangles"));
+			if (Settings->bNaniteInfo)
+			{
+				HeaderFields.Add(TEXT("NaniteEnabled"));
+				HeaderFields.Add(TEXT("NaniteTriangles"));
+				HeaderFields.Add(TEXT("NaniteFallbackPercent"));
+			}
 			if (Settings->bMaterialCount) HeaderFields.Add(TEXT("MaterialSlots"));
 			if (Settings->bTextureCount) HeaderFields.Add(TEXT("UniqueTextures"));
 			if (Settings->bMaxTextureResolution) HeaderFields.Add(TEXT("MaxTextureResolution"));
@@ -636,6 +654,12 @@ namespace Mesh
 				}
 				if (Settings->bComplexCollisionInfo) RowFields.Add(Core::CsvNumberOrEmpty(Item.ComplexCollisionVertices));
 				if (Settings->bTriangleCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.TriangleCount));
+				if (Settings->bNaniteInfo)
+				{
+					RowFields.Add(Item.bNaniteEnabled ? TEXT("True") : TEXT("False"));
+					RowFields.Add(Core::CsvNumberOrEmpty(Item.NaniteTriangles));
+					RowFields.Add(Core::CsvNumberOrEmpty(Item.NaniteFallbackPercent));
+				}
 				if (Settings->bMaterialCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.MaterialSlotCount));
 				if (Settings->bTextureCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.TextureCount));
 				if (Settings->bMaxTextureResolution) RowFields.Add(Core::CsvNumberOrEmpty(Item.MaxTextureResolution));
