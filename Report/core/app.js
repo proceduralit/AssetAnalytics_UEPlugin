@@ -17,12 +17,14 @@
     const reportBridgeUrl = "http://127.0.0.1:19842/asset-analytics/select";
 
     const preferredLabels = {
+        PackageDiskSize: "Package Disk Size (bytes)",
         LODCount: "LODs",
         LODGroup: "LOD Group",
         CollisionComplexity: "Collision Complexity",
         SimpleCollisionPrimitives: "Simple Collision Primitives",
+        PhysicsSizeMB: "Physics Size (MB)",
         ComplexCollisionVertices: "Complex Collision Verts",
-        LOD0Vertices: "Number of Verts",
+        LOD0Triangles: "Number of Triangles",
         MaxBoundsLengthM: "Max Bound Length (m)",
         MaterialSlots: "Material Slots",
         UVChannels: "UV Channels",
@@ -276,7 +278,7 @@
         });
 
         xAxisSelect.value = chooseMetric(previousX, "MaxBoundsLengthM", 0);
-        yAxisSelect.value = chooseMetric(previousY, "LOD0Vertices", Math.min(1, metrics.length - 1));
+        yAxisSelect.value = chooseMetric(previousY, "LOD0Triangles", Math.min(1, metrics.length - 1));
 
         if (xAxisSelect.value === yAxisSelect.value && metrics.length > 1) {
             yAxisSelect.value = metrics.find(metric => metric.key !== xAxisSelect.value).key;

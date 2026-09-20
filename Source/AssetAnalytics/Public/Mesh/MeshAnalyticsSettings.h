@@ -36,6 +36,10 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Asset Types")
 	bool bSkeletalMeshes = true;
 
+	/** Includes the package size on disk in bytes. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
+	bool bPackageDiskSize = true;
+
 	/** Includes the LOD count in the generated CSV. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
 	bool bLODCount = true;
@@ -48,9 +52,13 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
 	bool bCollisionInfo = true;
 
-	/** Includes the LOD 0 vertex count in the generated CSV. */
+	/** Includes the estimated physics resource size in megabytes. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Physics Size (Needs Asset Loading)"))
+	bool bPhysicsSize = false;
+
+	/** Includes the LOD 0 triangle count in the generated CSV. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
-	bool bVertexCount = true;
+	bool bTriangleCount = true;
 
 	/** Includes the material count in the generated CSV. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Material Count (Needs Asset Loading for Skeletal Meshes)"))
