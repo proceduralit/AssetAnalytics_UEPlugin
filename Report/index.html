@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mesh Analytics Report</title>
+    <link id="report-stylesheet" rel="stylesheet" href="core/styles.css">
+    <script>
+        if (window.location.protocol === "http:" || window.location.protocol === "https:") {
+            document.getElementById("report-stylesheet").href = "styles";
+        }
+
+        window.addEventListener("DOMContentLoaded", () => {
+            const isEditorServed = window.location.protocol === "http:" ||
+                window.location.protocol === "https:";
+            const plotlyScript = document.createElement("script");
+            plotlyScript.src = isEditorServed ? "plotly" : "core/plotly-basic-3.7.0.min.js";
+            plotlyScript.addEventListener("load", () => {
+                const appScript = document.createElement("script");
+                appScript.src = isEditorServed ? "script" : "core/app.js";
+                document.body.appendChild(appScript);
+            });
+            document.body.appendChild(plotlyScript);
+        });
+    </script>
+</head>
+<body>
+    <main class="report-shell">
+        <header class="report-header">
+            <div>
+                <h1>Mesh Analytics</h1>
+                <p id="file-summary">Choose or drop an analytics CSV to begin.</p>
+            </div>
+            <button id="choose-file" class="file-button" type="button">Choose CSV</button>
+            <input id="csv-file" type="file" accept=".csv,text/csv" hidden>
+        </header>
+
+        <section class="filter-panel" aria-labelledby="filter-title">
+            <div class="filter-header">
+                <div>
+                    <span id="filter-title">Filters</span>
+                    <small>All active conditions must match.</small>
+                </div>
+                <button id="add-filter" type="button" disabled>Add condition</button>
+            </div>
+            <div id="filter-list"></div>
+        </section>
+
+        <section id="drop-zone" class="chart-stage" aria-label="Mesh Analytics scatter plot">
+            <div id="chart" aria-live="polite"></div>
+            <div id="empty-state">
+                <strong>Drop your CSV file here</strong>
+                <span>or use Choose CSV above</span>
+            </div>
+            <div id="drop-overlay" aria-hidden="true">Drop CSV to load</div>
+        </section>
+
+        <section class="asset-action" aria-label="Selected graph asset">
+            <div>
+                <span>Selected asset</span>
+                <strong id="selected-asset">Click a point in the graph.</strong>
+                <small id="bridge-status" role="status"></small>
+            </div>
+            <button id="show-in-content-browser" type="button" disabled>Show in Content Browser</button>
+        </section>
+
+        <section class="axis-controls" aria-label="Chart axes">
+            <div class="axis-field">
+                <label for="x-axis">X-Axis</label>
+                <select id="x-axis" disabled></select>
+            </div>
+            <div class="axis-field">
+                <label for="y-axis">Y-Axis</label>
+                <select id="y-axis" disabled></select>
+            </div>
+        </section>
+
+        <p id="status" role="status"></p>
+    </main>
+</body>
+</html>
