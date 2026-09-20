@@ -76,10 +76,6 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Max Texture Resolution (Needs Asset Loading)"))
 	bool bMaxTextureResolution = false;
 
-	/** Includes the average texture resolution in the generated CSV. */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Average Texture Resolution (Needs Asset Loading)"))
-	bool bAverageTextureResolution = false;
-
 	/** Includes the Static Mesh lightmap resolution in the generated CSV. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Lightmap Resolution (Needs Asset Loading)"))
 	bool bLightmapResolution = false;
