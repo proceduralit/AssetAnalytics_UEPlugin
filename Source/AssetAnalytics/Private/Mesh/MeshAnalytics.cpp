@@ -48,7 +48,6 @@ namespace Mesh
 		int32 MaterialSlotCount = INDEX_NONE;
 		int32 TextureCount = INDEX_NONE;
 		int32 MaxTextureResolution = INDEX_NONE;
-		double AverageTextureResolution = -1.0;
 		int32 UVChannelCount = INDEX_NONE;
 		int32 LightmapResolution = INDEX_NONE;
 		double MaxBoundsLengthM = -1.0;
@@ -63,7 +62,7 @@ namespace Mesh
 		if (Settings.bMaterialCount) Item.MaterialSlotCount = Materials.Num();
 
 		const bool bCollectTextureCount = Settings.bTextureCount;
-		const bool bCollectTextureResolution = Settings.bMaxTextureResolution || Settings.bAverageTextureResolution;
+		const bool bCollectTextureResolution = Settings.bMaxTextureResolution;
 		if (!bCollectTextureCount && !bCollectTextureResolution) return;
 
 		TSet<UTexture*> UniqueTextures;
@@ -87,7 +86,6 @@ namespace Mesh
 
 		if (!bCollectTextureResolution) return;
 		int32 MaxTextureResolution = 0;
-		int64 TotalTextureResolution = 0;
 		for (const UTexture* Texture : UniqueTextures)
 		{
 			// Use the imported size for 2D textures, capped by Maximum Texture Size when set.
@@ -101,15 +99,8 @@ namespace Mesh
 			if (Texture->MaxTextureSize > 0) TextureResolution = FMath::Min(TextureResolution, Texture->MaxTextureSize);
 
 			MaxTextureResolution = FMath::Max(MaxTextureResolution, TextureResolution);
-			TotalTextureResolution += TextureResolution;
 		}
 		Item.MaxTextureResolution = MaxTextureResolution;
-		if (Settings.bAverageTextureResolution)
-		{
-			Item.AverageTextureResolution = UniqueTextures.Num() > 0
-				? static_cast<double>(TotalTextureResolution) / UniqueTextures.Num()
-				: 0.0;
-		}
 	}
 
 	/** Fills Item with the enabled skeletal mesh data. */
@@ -125,8 +116,7 @@ namespace Mesh
 		const bool bGatherMaterialData =
 			Settings.bMaterialCount ||
 			Settings.bTextureCount ||
-			Settings.bMaxTextureResolution ||
-			Settings.bAverageTextureResolution;
+			Settings.bMaxTextureResolution;
 		if (bGatherMaterialData)
 		{
 			TArray<UMaterialInterface*> Materials;
@@ -203,8 +193,7 @@ namespace Mesh
 		const bool bGatherMaterialData =
 			Settings.bMaterialCount ||
 			Settings.bTextureCount ||
-			Settings.bMaxTextureResolution ||
-			Settings.bAverageTextureResolution;
+			Settings.bMaxTextureResolution;
 		if (bGatherMaterialData)
 		{
 			TArray<UMaterialInterface*> Materials;
@@ -278,7 +267,7 @@ namespace Mesh
 		const UMeshAnalyticsSettings& Settings)
 	{
 		const bool bIsSkeletalMesh = AssetData.AssetClass == USkeletalMesh::StaticClass()->GetFName();
-		if (Settings.bTextureCount || Settings.bMaxTextureResolution || Settings.bAverageTextureResolution) return true;
+		if (Settings.bTextureCount || Settings.bMaxTextureResolution) return true;
 		if (bIsSkeletalMesh)
 		{
 			return Settings.bMaterialCount || Settings.bUVChannelCount || Settings.bMaxBoundsLength;
@@ -581,7 +570,6 @@ namespace Mesh
 			if (Settings->bMaterialCount) HeaderFields.Add(TEXT("MaterialSlots"));
 			if (Settings->bTextureCount) HeaderFields.Add(TEXT("UniqueTextures"));
 			if (Settings->bMaxTextureResolution) HeaderFields.Add(TEXT("MaxTextureResolution"));
-			if (Settings->bAverageTextureResolution) HeaderFields.Add(TEXT("AverageTextureResolution"));
 			if (Settings->bUVChannelCount) HeaderFields.Add(TEXT("UVChannels"));
 			if (Settings->bLightmapResolution) HeaderFields.Add(TEXT("LightmapResolution"));
 			if (Settings->bMaxBoundsLength) HeaderFields.Add(TEXT("MaxBoundsLengthM"));
@@ -605,7 +593,6 @@ namespace Mesh
 				if (Settings->bMaterialCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.MaterialSlotCount));
 				if (Settings->bTextureCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.TextureCount));
 				if (Settings->bMaxTextureResolution) RowFields.Add(Core::CsvNumberOrEmpty(Item.MaxTextureResolution));
-				if (Settings->bAverageTextureResolution) RowFields.Add(Core::CsvNumberOrEmpty(Item.AverageTextureResolution));
 				if (Settings->bUVChannelCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.UVChannelCount));
 				if (Settings->bLightmapResolution) RowFields.Add(Core::CsvNumberOrEmpty(Item.LightmapResolution));
 				if (Settings->bMaxBoundsLength) RowFields.Add(Core::CsvNumberOrEmpty(Item.MaxBoundsLengthM));
