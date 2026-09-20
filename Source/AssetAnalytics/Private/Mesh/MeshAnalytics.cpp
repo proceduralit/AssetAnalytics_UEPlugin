@@ -44,7 +44,7 @@ namespace Mesh
 		FString CollisionComplexity;
 		int32 SimpleCollisionPrimitives = INDEX_NONE;
 		int32 ComplexCollisionVertices = INDEX_NONE;
-		int32 VertexCount = INDEX_NONE;
+		int32 TriangleCount = INDEX_NONE;
 		int32 MaterialSlotCount = INDEX_NONE;
 		int32 TextureCount = INDEX_NONE;
 		int32 MaxTextureResolution = INDEX_NONE;
@@ -126,14 +126,13 @@ namespace Mesh
 			const FVector BoundsSize = SkeletalMesh.GetBounds().BoxExtent * 2.0f;
 			Item.MaxBoundsLengthM = FMath::Max(BoundsSize.GetMax(), 1.0f) / 100.0;
 		}
-		if (Settings.bVertexCount || Settings.bUVChannelCount)
+		if (Settings.bUVChannelCount)
 		{
 			const FSkeletalMeshRenderData* RenderData = SkeletalMesh.GetResourceForRendering();
 			if (RenderData != nullptr && RenderData->LODRenderData.Num() > 0)
 			{
 				const FSkeletalMeshLODRenderData& LODRenderData = RenderData->LODRenderData[0];
-				if (Settings.bVertexCount) Item.VertexCount = static_cast<int32>(LODRenderData.GetNumVertices());
-				if (Settings.bUVChannelCount) Item.UVChannelCount = static_cast<int32>(LODRenderData.GetNumTexCoords());
+				Item.UVChannelCount = static_cast<int32>(LODRenderData.GetNumTexCoords());
 			}
 		}
 	}
@@ -204,11 +203,9 @@ namespace Mesh
 			Item.MaxBoundsLengthM = FMath::Max(BoundsSize.GetMax(), 1.0f) / 100.0;
 		}
 		if (Settings.bLightmapResolution) Item.LightmapResolution = StaticMesh.GetLightMapResolution();
-		if ((Settings.bVertexCount || Settings.bUVChannelCount) &&
-			StaticMesh.HasValidRenderData(true, 0))
+		if (Settings.bUVChannelCount && StaticMesh.HasValidRenderData(true, 0))
 		{
-			if (Settings.bVertexCount) Item.VertexCount = StaticMesh.GetNumVertices(0);
-			if (Settings.bUVChannelCount) Item.UVChannelCount = StaticMesh.GetNumUVChannels(0);
+			Item.UVChannelCount = StaticMesh.GetNumUVChannels(0);
 		}
 	}
 
@@ -220,7 +217,7 @@ namespace Mesh
 	{
 		Item.bIsSkeletalMesh = AssetData.AssetClassPath == USkeletalMesh::StaticClass()->GetClassPathName();
 		if (Settings.bLODCount) AssetData.GetTagValue(TEXT("LODs"), Item.LODCount);
-		if (Settings.bVertexCount) AssetData.GetTagValue(TEXT("Vertices"), Item.VertexCount);
+		if (Settings.bTriangleCount) AssetData.GetTagValue(TEXT("Triangles"), Item.TriangleCount);
 
 		if (Item.bIsSkeletalMesh)
 		{
@@ -561,7 +558,7 @@ namespace Mesh
 				HeaderFields.Add(TEXT("SimpleCollisionPrimitives"));
 			}
 			if (Settings->bComplexCollisionInfo) HeaderFields.Add(TEXT("ComplexCollisionVertices"));
-			if (Settings->bVertexCount) HeaderFields.Add(TEXT("LOD0Vertices"));
+			if (Settings->bTriangleCount) HeaderFields.Add(TEXT("LOD0Triangles"));
 			if (Settings->bMaterialCount) HeaderFields.Add(TEXT("MaterialSlots"));
 			if (Settings->bTextureCount) HeaderFields.Add(TEXT("UniqueTextures"));
 			if (Settings->bMaxTextureResolution) HeaderFields.Add(TEXT("MaxTextureResolution"));
@@ -584,7 +581,7 @@ namespace Mesh
 					RowFields.Add(Core::CsvNumberOrEmpty(Item.SimpleCollisionPrimitives));
 				}
 				if (Settings->bComplexCollisionInfo) RowFields.Add(Core::CsvNumberOrEmpty(Item.ComplexCollisionVertices));
-				if (Settings->bVertexCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.VertexCount));
+				if (Settings->bTriangleCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.TriangleCount));
 				if (Settings->bMaterialCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.MaterialSlotCount));
 				if (Settings->bTextureCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.TextureCount));
 				if (Settings->bMaxTextureResolution) RowFields.Add(Core::CsvNumberOrEmpty(Item.MaxTextureResolution));
