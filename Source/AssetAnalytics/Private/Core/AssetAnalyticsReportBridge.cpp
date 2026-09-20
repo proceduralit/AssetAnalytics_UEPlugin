@@ -13,6 +13,7 @@
 #include "Interfaces/IPluginManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "UObject/SoftObjectPath.h"
 
 namespace AssetAnalytics
 {
@@ -196,7 +197,7 @@ namespace Core
 		FAssetRegistryModule& AssetRegistryModule =
 			FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 		const FAssetData AssetData =
-			AssetRegistryModule.Get().GetAssetByObjectPath(FName(*ObjectPath));
+			AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(ObjectPath));
 		if (!AssetData.IsValid())
 		{
 			OnComplete(MakeReportBridgeResponse(

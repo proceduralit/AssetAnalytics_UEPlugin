@@ -71,7 +71,7 @@ TSharedRef<SDockTab> FAssetAnalyticsModule::OnSpawnMeshAnalyticsReportTab(const 
 
 	TSharedRef<SDockTab> CommandTab = SNew(SDockTab).TabRole(ETabRole::NomadTab);
 	const TWeakPtr<SDockTab> WeakCommandTab = CommandTab;
-	FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
 		[WeakCommandTab](float)
 		{
 			if (const TSharedPtr<SDockTab> PinnedCommandTab = WeakCommandTab.Pin()) PinnedCommandTab->RequestCloseTab();
