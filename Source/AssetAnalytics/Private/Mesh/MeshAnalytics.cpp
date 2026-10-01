@@ -453,18 +453,49 @@ namespace Mesh
 			ProgressNotificationItem.Reset();
 		}
 
-		/** Safely unloads mesh packages that were loaded only for this report. */
+		/** Unloads mesh packages loaded by the report and logs any that remain loaded. */
 		void UnloadReportPackages()
 		{
 			if (PackagesLoadedForReport.Num() == 0) return;
 
+			TArray<FName> PackageNames;
+			PackageNames.Reserve(PackagesLoadedForReport.Num());
+			for (const UPackage* Package : PackagesLoadedForReport)
+			{
+				if (Package != nullptr) PackageNames.AddUnique(Package->GetFName());
+			}
+
 			FText UnloadError;
-			UPackageTools::UnloadPackages(PackagesLoadedForReport, UnloadError);
+			const bool bPackagesChanged = UPackageTools::UnloadPackages(PackagesLoadedForReport, UnloadError);
+			PackagesLoadedForReport.Reset();
+
+			TArray<FString> RemainingPackageNames;
+			for (const FName PackageName : PackageNames)
+			{
+				if (FindPackage(nullptr, *PackageName.ToString()) != nullptr)
+				{
+					RemainingPackageNames.Add(PackageName.ToString());
+				}
+			}
+
 			if (!UnloadError.IsEmpty())
 			{
 				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not unload some report packages: %s"), *UnloadError.ToString());
 			}
-			PackagesLoadedForReport.Reset();
+			if (!bPackagesChanged)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics did not unload any of the %d report-loaded packages."), PackageNames.Num());
+			}
+			if (RemainingPackageNames.Num() > 0)
+			{
+				UE_LOG(
+					LogTemp,
+					Warning,
+					TEXT("Asset Analytics retained %d of %d report-loaded packages after unloading: %s"),
+					RemainingPackageNames.Num(),
+					PackageNames.Num(),
+					*FString::Join(RemainingPackageNames, TEXT(", ")));
+			}
 		}
 
 		/** Cancels gathering, clears unfinished results, and updates the notification. */
@@ -534,14 +565,14 @@ namespace Mesh
 				if (Settings->bIgnoreUnreferencedAssets &&
 					!HasRelevantReferencer(AssetRegistry, AssetData, Settings->bIgnoreDeveloperReferences)) continue;
 				UObject* MeshAsset = nullptr;
-				bool bWasPackageLoaded = false;
+				bool bWasAssetLoaded = true;
 				if (NeedsAssetLoading(AssetData, *Settings))
 				{
-					bWasPackageLoaded = FindPackage(nullptr, *AssetData.PackageName.ToString()) != nullptr;
+					bWasAssetLoaded = AssetData.IsAssetLoaded();
 					MeshAsset = AssetData.GetAsset();
 				}
 				AssetItems.Add(MakeMeshAssetData(AssetRegistry, AssetData, MeshAsset, *Settings));
-				if (!bWasPackageLoaded && MeshAsset != nullptr) PackagesLoadedForReport.AddUnique(MeshAsset->GetOutermost());
+				if (!bWasAssetLoaded && MeshAsset != nullptr) PackagesLoadedForReport.AddUnique(MeshAsset->GetOutermost());
 			}
 			UnloadReportPackages();
 			UpdateProgressNotification();
