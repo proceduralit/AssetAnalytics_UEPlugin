@@ -66,7 +66,7 @@ namespace Core
 		const EHttpServerResponseCodes ResponseCode)
 	{
 		TUniquePtr<FHttpServerResponse> Response =
-			FHttpServerResponse::Create(Message, TEXT("text/plain; charset=utf-8"));
+			FHttpServerResponse::Create(Message, TEXT("text/plain"));
 		Response->Code = ResponseCode;
 		Response->Headers.Add(TEXT("Access-Control-Allow-Origin"), { TEXT("*") });
 		Response->Headers.Add(TEXT("Access-Control-Allow-Methods"), { TEXT("GET, OPTIONS") });
@@ -91,8 +91,8 @@ namespace Core
 			return true;
 		}
 
-		FString FileContents;
-		if (!FFileHelper::LoadFileToString(FileContents, *FilePath))
+		TArray<uint8> FileContents;
+		if (!FFileHelper::LoadFileToArray(FileContents, *FilePath))
 		{
 			OnComplete(MakeReportBridgeResponse(
 				TEXT("The requested report file was not found."),
@@ -101,7 +101,7 @@ namespace Core
 		}
 
 		TUniquePtr<FHttpServerResponse> Response =
-			FHttpServerResponse::Create(FileContents, ContentType);
+			FHttpServerResponse::Create(MoveTemp(FileContents), ContentType);
 		Response->Code = EHttpServerResponseCodes::Ok;
 		Response->Headers.Add(TEXT("Cache-Control"), { TEXT("no-store") });
 		OnComplete(MoveTemp(Response));
