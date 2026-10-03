@@ -237,10 +237,6 @@ namespace Mesh
 			Item.MaxBoundsLengthM = FMath::Max(BoundsSize.GetMax(), 1.0f) / 100.0;
 		}
 		if (Settings.bLightmapResolution) Item.LightmapResolution = StaticMesh.GetLightMapResolution();
-		if (Settings.bUVChannelCount && StaticMesh.HasValidRenderData(true, 0))
-		{
-			Item.UVChannelCount = StaticMesh.GetNumUVChannels(0);
-		}
 	}
 
 	/** Fills Item with values cached in the Asset Registry. */
