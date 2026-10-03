@@ -17,6 +17,11 @@ public:
 	/** Sets where these options appear in Editor Preferences. */
 	UMeshAnalyticsSettings();
 
+#if WITH_EDITOR
+	/** Returns the memory-use guidance shown at the top of the settings page. */
+	virtual FText GetSectionDescription() const override;
+#endif
+
 	/** Skips mesh assets that have no relevant project references. */
 	UPROPERTY(config, EditAnywhere, Category = "Asset Filters")
 	bool bIgnoreUnreferencedAssets = true;
@@ -33,7 +38,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Asset Types")
 	bool bStaticMeshes = true;
 
-	/** Includes Skeletal Mesh assets in Mesh Analytics. */
+	/** Includes Skeletal Mesh assets in Mesh Analytics. */  
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Asset Types")
 	bool bSkeletalMeshes = true;
 
