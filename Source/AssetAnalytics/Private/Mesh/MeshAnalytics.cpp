@@ -241,11 +241,9 @@ namespace Mesh
 			Item.MaxBoundsLengthM = FMath::Max(BoundsSize.GetMax(), 1.0f) / 100.0;
 		}
 		if (Settings.bLightmapResolution) Item.LightmapResolution = StaticMesh.GetLightMapResolution();
-		if ((Settings.bTriangleCount || Settings.bUVChannelCount) &&
-			StaticMesh.HasValidRenderData(true, 0))
+		if (Settings.bTriangleCount && StaticMesh.HasValidRenderData(true, 0))
 		{
-			if (Settings.bTriangleCount) Item.TriangleCount = StaticMesh.GetRenderData()->LODResources[0].GetNumTriangles();
-			if (Settings.bUVChannelCount) Item.UVChannelCount = StaticMesh.GetNumUVChannels(0);
+			Item.TriangleCount = StaticMesh.GetRenderData()->LODResources[0].GetNumTriangles();
 		}
 	}
 
