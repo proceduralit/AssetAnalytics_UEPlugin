@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.0",
+	"VersionName": "1.1.0"
 	"EngineVersion": "5.7.0",
 	"FriendlyName": "Asset Analytics",
 	"Description": "Editor tools for generating interactive asset analytics reports. Released under the MIT License.",
