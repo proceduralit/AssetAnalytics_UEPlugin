@@ -4,6 +4,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Misc/PackageName.h"
 
 namespace AssetAnalytics
 {
@@ -34,7 +35,7 @@ namespace Core
 		return Value < 0.0 ? FString() : FString::Printf(TEXT("%.3f"), Value);
 	}
 
-	/** Converts a configured content folder to a valid Unreal package path. */
+	/** Converts a configured, mounted content folder to a valid Unreal package path. */
 	inline bool TryGetPackagePath(const FString& ConfiguredPath, FName& OutPackagePath)
 	{
 		FString Path = ConfiguredPath;
@@ -42,6 +43,9 @@ namespace Core
 		Path.ReplaceInline(TEXT("\\"), TEXT("/"));
 
 		if (!Path.StartsWith(TEXT("/"))) return false;
+
+		FString Filename;
+		if (!FPackageName::TryConvertLongPackageNameToFilename(Path / TEXT(""), Filename)) return false;
 
 		OutPackagePath = FName(*Path);
 		return true;
