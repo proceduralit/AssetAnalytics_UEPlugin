@@ -534,7 +534,18 @@ namespace Mesh
 			for (const FDirectoryPath& Directory : Settings->SearchFolders)
 			{
 				FName PackagePath;
-				if (Core::TryGetPackagePath(Directory.Path, PackagePath)) Filter.PackagePaths.AddUnique(PackagePath);
+				if (Core::TryGetPackagePath(Directory.Path, PackagePath))
+				{
+					Filter.PackagePaths.AddUnique(PackagePath);
+				}
+				else
+				{
+					UE_LOG(
+						LogTemp,
+						Warning,
+						TEXT("Asset Analytics skipped search folder '%s' because it is invalid or its content root is not mounted."),
+						*Directory.Path);
+				}
 			}
 			if (Filter.ClassPaths.Num() == 0 || Filter.PackagePaths.Num() == 0) return;
 
