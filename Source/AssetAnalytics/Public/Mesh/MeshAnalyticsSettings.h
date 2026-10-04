@@ -58,10 +58,6 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
 	bool bCollisionInfo = true;
 
-	/** Includes the estimated physics resource size in megabytes. */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Physics Size (Loads Assets Missing Registry Data)"))
-	bool bPhysicsSize = true;
-
 	/** Includes the LOD 0 triangle count in the generated CSV. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
 	bool bTriangleCount = true;
@@ -81,6 +77,10 @@ public:
 	/** Includes the maximum bounds length in the generated CSV. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Max Bounds Length (Needs Asset Loading for Skeletal Meshes)"))
 	bool bMaxBoundsLength = true;
+
+	/** Includes the estimated physics resource size in megabytes. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Physics Size (Loads Assets Missing Registry Data)"))
+	bool bPhysicsSize = false;
 
 	/** Includes the complex collision vertex count in the generated CSV. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Complex Collision Info (Needs Asset Loading)"))
