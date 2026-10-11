@@ -314,6 +314,37 @@ namespace Mesh
 		return Settings.bComplexCollisionInfo || Settings.bLightmapResolution;
 	}
 
+	/** Collects the hard dependency packages that are not loaded before the report loads a mesh. */
+	static void GatherUnloadedHardDependencies(
+		IAssetRegistry& AssetRegistry,
+		const FName RootPackageName,
+		TArray<FName>& UnloadedPackageNames)
+	{
+		TSet<FName> VisitedPackageNames;
+		TArray<FName> PackageNamesToVisit;
+		PackageNamesToVisit.Add(RootPackageName);
+
+		for (int32 PackageIndex = 0; PackageIndex < PackageNamesToVisit.Num(); ++PackageIndex)
+		{
+			const FName PackageName = PackageNamesToVisit[PackageIndex];
+			if (VisitedPackageNames.Contains(PackageName)) continue;
+			VisitedPackageNames.Add(PackageName);
+
+			if (FindPackage(nullptr, *PackageName.ToString()) == nullptr)
+			{
+				UnloadedPackageNames.Add(PackageName);
+			}
+
+			TArray<FName> DependencyPackageNames;
+			AssetRegistry.GetDependencies(
+				PackageName,
+				DependencyPackageNames,
+				UE::AssetRegistry::EDependencyCategory::Package,
+				UE::AssetRegistry::FDependencyQuery(UE::AssetRegistry::EDependencyQuery::Hard));
+			PackageNamesToVisit.Append(DependencyPackageNames);
+		}
+	}
+
 	/**
 	 * Fills a report row from registry data and an optional loaded MeshAsset.
 	 * Returns: The completed report row.
@@ -364,15 +395,11 @@ namespace Mesh
 		{
 			if (TickerHandle.IsValid()) return;
 			ShowProgressNotification();
-			BeginGatheringAssets();
-			UpdateProgressNotification();
-			if (PendingAssets.Num() == 0)
-			{
-				CompleteReport();
-				return;
-			}
+
+			// The folder scan blocks the editor, so give Slate time to draw the notification first.
 			TickerHandle = FTicker::GetCoreTicker().AddTicker(
-				FTickerDelegate::CreateRaw(this, &FMeshAnalyticsRunner::Tick));
+				FTickerDelegate::CreateRaw(this, &FMeshAnalyticsRunner::FindAssetsAndStartProcessing),
+				NotificationDisplayDelaySeconds);
 		}
 
 		/** Stops gathering and throws away unfinished results. */
@@ -401,6 +428,7 @@ namespace Mesh
 				FSimpleDelegate::CreateRaw(this, &FMeshAnalyticsRunner::Cancel)));
 			NotificationInfo.WidthOverride = 320.0f;
 			NotificationInfo.bFireAndForget = false;
+			NotificationInfo.FadeInDuration = 0.1f;
 			NotificationInfo.FadeOutDuration = 0.5f;
 			NotificationInfo.ExpireDuration = 3.0f;
 			NotificationInfo.bUseLargeFont = false;
@@ -451,7 +479,7 @@ namespace Mesh
 			ProgressNotificationItem.Reset();
 		}
 
-		/** Unloads mesh packages loaded by the report and logs any that remain loaded. */
+		/** Unloads asset packages loaded by the report and logs any that remain loaded. */
 		void UnloadReportPackages()
 		{
 			if (PackagesLoadedForReport.Num() == 0) return;
@@ -557,6 +585,25 @@ namespace Mesh
 		}
 
 		/**
+		 * Finds the mesh assets, then hands over to Tick for batch processing.
+		 * Returns: False, so this one-shot ticker is removed.
+		 */
+		bool FindAssetsAndStartProcessing(float)
+		{
+			TickerHandle.Reset();
+			BeginGatheringAssets();
+			UpdateProgressNotification();
+			if (PendingAssets.Num() == 0)
+			{
+				CompleteReport();
+				return false;
+			}
+			TickerHandle = FTicker::GetCoreTicker().AddTicker(
+				FTickerDelegate::CreateRaw(this, &FMeshAnalyticsRunner::Tick));
+			return false;
+		}
+
+		/**
 		 * Processes the next batch and loads assets only for columns that require it.
 		 * Returns: True while more assets are waiting.
 		 */
@@ -566,7 +613,9 @@ namespace Mesh
 				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 			IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 			const UMeshAnalyticsSettings* Settings = GetDefault<UMeshAnalyticsSettings>();
-			const int32 BatchEnd = FMath::Min(NextAssetIndex + AssetsPerTick, PendingAssets.Num());
+			const int32 RemainingAssets = PendingAssets.Num() - NextAssetIndex;
+			const int32 AssetsThisTick = FMath::Min(FMath::Max(Settings->AssetsPerTick, 1), RemainingAssets);
+			const int32 BatchEnd = NextAssetIndex + AssetsThisTick;
 
 			for (; NextAssetIndex < BatchEnd; ++NextAssetIndex)
 			{
@@ -574,14 +623,20 @@ namespace Mesh
 				if (Settings->bIgnoreUnreferencedAssets &&
 					!HasRelevantReferencer(AssetRegistry, AssetData, Settings->bIgnoreDeveloperReferences)) continue;
 				UObject* MeshAsset = nullptr;
-				bool bWasAssetLoaded = true;
+				TArray<FName> UnloadedPackageNames;
 				if (NeedsAssetLoading(AssetData, *Settings))
 				{
-					bWasAssetLoaded = AssetData.IsAssetLoaded();
+					GatherUnloadedHardDependencies(AssetRegistry, AssetData.PackageName, UnloadedPackageNames);
 					MeshAsset = AssetData.GetAsset();
 				}
 				AssetItems.Add(MakeMeshAssetData(AssetRegistry, AssetData, MeshAsset, *Settings));
-				if (!bWasAssetLoaded && MeshAsset != nullptr) PackagesLoadedForReport.AddUnique(MeshAsset->GetOutermost());
+				for (const FName PackageName : UnloadedPackageNames)
+				{
+					if (UPackage* LoadedPackage = FindPackage(nullptr, *PackageName.ToString()))
+					{
+						PackagesLoadedForReport.AddUnique(LoadedPackage);
+					}
+				}
 			}
 			UnloadReportPackages();
 			UpdateProgressNotification();
@@ -693,7 +748,7 @@ namespace Mesh
 			return CsvData;
 		}
 
-		static constexpr int32 AssetsPerTick = 10;
+		static constexpr float NotificationDisplayDelaySeconds = 0.2f;
 		TArray<FMeshAssetData> AssetItems;
 		TArray<FAssetData> PendingAssets;
 		TArray<UPackage*> PackagesLoadedForReport;
