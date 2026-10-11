@@ -34,6 +34,13 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics", meta = (ContentDir))
 	TArray<FDirectoryPath> SearchFolders;
 
+	/**
+	 * Number of mesh assets processed per editor tick. Loaded assets are unloaded after each batch,
+	 * so higher values finish faster but raise peak memory use.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics", meta = (ClampMin = "1", UIMin = "1", UIMax = "500"))
+	int32 AssetsPerTick = 50;
+
 	/** Includes Static Mesh assets in Mesh Analytics. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Asset Types")
 	bool bStaticMeshes = true;

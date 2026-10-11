@@ -23,7 +23,9 @@
 #include "PhysicsEngine/PhysicsSettings.h"
 #include "Rendering/SkeletalMeshRenderData.h"
 #include "ProfilingDebugging/ResourceSize.h"
+#include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectHash.h"
 #include "Widgets/Notifications/SNotificationList.h"
 
 #define LOCTEXT_NAMESPACE "MeshAnalytics"
@@ -369,15 +371,11 @@ namespace Mesh
 		{
 			if (TickerHandle.IsValid()) return;
 			ShowProgressNotification();
-			BeginGatheringAssets();
-			UpdateProgressNotification();
-			if (PendingAssets.Num() == 0)
-			{
-				CompleteReport();
-				return;
-			}
+
+			// The folder scan blocks the editor, so give Slate time to draw the notification first.
 			TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
-				FTickerDelegate::CreateRaw(this, &FMeshAnalyticsRunner::Tick));
+				FTickerDelegate::CreateRaw(this, &FMeshAnalyticsRunner::FindAssetsAndStartProcessing),
+				NotificationDisplayDelaySeconds);
 		}
 
 		/** Stops gathering and throws away unfinished results. */
@@ -406,6 +404,7 @@ namespace Mesh
 				FSimpleDelegate::CreateRaw(this, &FMeshAnalyticsRunner::Cancel)));
 			NotificationInfo.WidthOverride = 320.0f;
 			NotificationInfo.bFireAndForget = false;
+			NotificationInfo.FadeInDuration = 0.1f;
 			NotificationInfo.FadeOutDuration = 0.5f;
 			NotificationInfo.ExpireDuration = 3.0f;
 			NotificationInfo.bUseLargeFont = false;
@@ -456,7 +455,33 @@ namespace Mesh
 			ProgressNotificationItem.Reset();
 		}
 
-		/** Unloads mesh packages loaded by the report and logs any that remain loaded. */
+		/** Returns every package that is currently loaded. */
+		static TSet<UPackage*> GetLoadedPackages()
+		{
+			TSet<UPackage*> LoadedPackages;
+			ForEachObjectOfClass(UPackage::StaticClass(), [&LoadedPackages](UObject* Object)
+			{
+				LoadedPackages.Add(static_cast<UPackage*>(Object));
+			}, false);
+			return LoadedPackages;
+		}
+
+		/**
+		 * Tracks the packages loaded from disk since PackagesBefore was taken.
+		 * This includes the dependencies a mesh pulls in (materials, textures, skeletons, physics assets).
+		 */
+		void TrackPackagesLoadedSince(const TSet<UPackage*>& PackagesBefore)
+		{
+			ForEachObjectOfClass(UPackage::StaticClass(), [this, &PackagesBefore](UObject* Object)
+			{
+				UPackage* Package = static_cast<UPackage*>(Object);
+				if (PackagesBefore.Contains(Package)) return;
+				if (Package->HasAnyPackageFlags(PKG_CompiledIn) || Package->GetLoadedPath().IsEmpty()) return;
+				PackagesLoadedForReport.AddUnique(Package);
+			}, false);
+		}
+
+		/** Unloads packages loaded by the report and logs any that remain loaded. */
 		void UnloadReportPackages()
 		{
 			if (PackagesLoadedForReport.Num() == 0) return;
@@ -468,8 +493,11 @@ namespace Mesh
 				if (Package != nullptr) PackageNames.AddUnique(Package->GetFName());
 			}
 
-			FText UnloadError;
-			const bool bPackagesChanged = UPackageTools::UnloadPackages(PackagesLoadedForReport, UnloadError);
+			// Keep the user's undo history; the report never transacts on the packages it loads.
+			UPackageTools::FUnloadPackageParams UnloadParams(PackagesLoadedForReport);
+			UnloadParams.bResetTransBuffer = false;
+			const bool bPackagesChanged = UPackageTools::UnloadPackages(UnloadParams);
+			const FText& UnloadError = UnloadParams.OutErrorMessage;
 			PackagesLoadedForReport.Reset();
 
 			TArray<FString> RemainingPackageNames;
@@ -562,6 +590,25 @@ namespace Mesh
 		}
 
 		/**
+		 * Finds the mesh assets, then hands over to Tick for batch processing.
+		 * Returns: False, so this one-shot ticker is removed.
+		 */
+		bool FindAssetsAndStartProcessing(float)
+		{
+			TickerHandle.Reset();
+			BeginGatheringAssets();
+			UpdateProgressNotification();
+			if (PendingAssets.Num() == 0)
+			{
+				CompleteReport();
+				return false;
+			}
+			TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+				FTickerDelegate::CreateRaw(this, &FMeshAnalyticsRunner::Tick));
+			return false;
+		}
+
+		/**
 		 * Processes the next batch and loads assets only for columns that require it.
 		 * Returns: True while more assets are waiting.
 		 */
@@ -571,7 +618,9 @@ namespace Mesh
 				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 			IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 			const UMeshAnalyticsSettings* Settings = GetDefault<UMeshAnalyticsSettings>();
-			const int32 BatchEnd = FMath::Min(NextAssetIndex + AssetsPerTick, PendingAssets.Num());
+			const int32 BatchEnd = FMath::Min(NextAssetIndex + FMath::Max(Settings->AssetsPerTick, 1), PendingAssets.Num());
+			const TSet<UPackage*> PackagesBeforeBatch = GetLoadedPackages();
+			bool bLoadedAnyAsset = false;
 
 			for (; NextAssetIndex < BatchEnd; ++NextAssetIndex)
 			{
@@ -586,8 +635,9 @@ namespace Mesh
 					MeshAsset = AssetData.GetAsset();
 				}
 				AssetItems.Add(MakeMeshAssetData(AssetRegistry, AssetData, MeshAsset, *Settings));
-				if (!bWasAssetLoaded && MeshAsset != nullptr) PackagesLoadedForReport.AddUnique(MeshAsset->GetOutermost());
+				if (!bWasAssetLoaded && MeshAsset != nullptr) bLoadedAnyAsset = true;
 			}
+			if (bLoadedAnyAsset) TrackPackagesLoadedSince(PackagesBeforeBatch);
 			UnloadReportPackages();
 			UpdateProgressNotification();
 
@@ -710,7 +760,7 @@ namespace Mesh
 			return CsvData;
 		}
 
-		static constexpr int32 AssetsPerTick = 10;
+		static constexpr float NotificationDisplayDelaySeconds = 0.2f;
 		TArray<FMeshAssetData> AssetItems;
 		TArray<FAssetData> PendingAssets;
 		TArray<UPackage*> PackagesLoadedForReport;
