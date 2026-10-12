@@ -4,6 +4,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "Misc/PackageName.h"
 
 namespace AssetAnalytics
@@ -49,6 +51,31 @@ namespace Core
 
 		OutPackagePath = FName(*Path);
 		return true;
+	}
+
+	/** Returns whether AssetData has a game reference, optionally ignoring the Developers folder. */
+	inline bool HasRelevantReferencer(
+		IAssetRegistry& AssetRegistry,
+		const FAssetData& AssetData,
+		const bool bIgnoreDeveloperReferences)
+	{
+		TArray<FName> GameReferencers;
+		AssetRegistry.GetReferencers(
+			AssetData.PackageName,
+			GameReferencers,
+			UE::AssetRegistry::EDependencyCategory::Package,
+			UE::AssetRegistry::FDependencyQuery(UE::AssetRegistry::EDependencyQuery::Game));
+		if (!bIgnoreDeveloperReferences) return GameReferencers.Num() > 0;
+
+		for (const FName Referencer : GameReferencers)
+		{
+			const FString ReferencerPath = Referencer.ToString();
+			const bool bIsDeveloperAsset =
+				ReferencerPath.Equals(TEXT("/Game/Developers"), ESearchCase::IgnoreCase) ||
+				ReferencerPath.StartsWith(TEXT("/Game/Developers/"), ESearchCase::IgnoreCase);
+			if (!bIsDeveloperAsset) return true;
+		}
+		return false;
 	}
 }
 }

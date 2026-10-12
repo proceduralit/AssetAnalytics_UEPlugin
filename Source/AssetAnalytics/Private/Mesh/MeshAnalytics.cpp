@@ -3,6 +3,7 @@
 
 #include "Mesh/MeshAnalytics.h"
 #include "Mesh/MeshAnalyticsSettings.h"
+#include "Core/AssetAnalyticsPackageUnloader.h"
 #include "Core/AssetAnalyticsReportBridge.h"
 #include "Core/AssetAnalyticsUtilities.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -17,15 +18,12 @@
 #include "Materials/MaterialInterface.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "PackageTools.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "PhysicsEngine/PhysicsSettings.h"
 #include "Rendering/SkeletalMeshRenderData.h"
 #include "ProfilingDebugging/ResourceSize.h"
 #include "UObject/Package.h"
-#include "UObject/UObjectGlobals.h"
-#include "UObject/UObjectHash.h"
 #include "Widgets/Notifications/SNotificationList.h"
 
 #define LOCTEXT_NAMESPACE "MeshAnalytics"
@@ -338,31 +336,6 @@ namespace Mesh
 		return Item;
 	}
 
-	/** Returns whether AssetData has a reference allowed by the current filter settings. */
-	static bool HasRelevantReferencer(
-		IAssetRegistry& AssetRegistry,
-		const FAssetData& AssetData,
-		const bool bIgnoreDeveloperReferences)
-	{
-		TArray<FName> GameReferencers;
-		AssetRegistry.GetReferencers(
-			AssetData.PackageName,
-			GameReferencers,
-			UE::AssetRegistry::EDependencyCategory::Package,
-			UE::AssetRegistry::FDependencyQuery(UE::AssetRegistry::EDependencyQuery::Game));
-		if (!bIgnoreDeveloperReferences) return GameReferencers.Num() > 0;
-
-		for (const FName Referencer : GameReferencers)
-		{
-			const FString ReferencerPath = Referencer.ToString();
-			const bool bIsDeveloperAsset =
-				ReferencerPath.Equals(TEXT("/Game/Developers"), ESearchCase::IgnoreCase) ||
-				ReferencerPath.StartsWith(TEXT("/Game/Developers/"), ESearchCase::IgnoreCase);
-			if (!bIsDeveloperAsset) return true;
-		}
-		return false;
-	}
-
 	class FMeshAnalyticsRunner
 	{
 	public:
@@ -389,7 +362,7 @@ namespace Mesh
 			PendingAssets.Reset();
 			AssetItems.Reset();
 			NextAssetIndex = 0;
-			UnloadReportPackages();
+			PackageUnloader.UnloadReportPackages();
 			DismissProgressNotification();
 		}
 
@@ -455,80 +428,6 @@ namespace Mesh
 			ProgressNotificationItem.Reset();
 		}
 
-		/** Returns every package that is currently loaded. */
-		static TSet<UPackage*> GetLoadedPackages()
-		{
-			TSet<UPackage*> LoadedPackages;
-			ForEachObjectOfClass(UPackage::StaticClass(), [&LoadedPackages](UObject* Object)
-			{
-				LoadedPackages.Add(static_cast<UPackage*>(Object));
-			}, false);
-			return LoadedPackages;
-		}
-
-		/**
-		 * Tracks the packages loaded from disk since PackagesBefore was taken.
-		 * This includes the dependencies a mesh pulls in (materials, textures, skeletons, physics assets).
-		 */
-		void TrackPackagesLoadedSince(const TSet<UPackage*>& PackagesBefore)
-		{
-			ForEachObjectOfClass(UPackage::StaticClass(), [this, &PackagesBefore](UObject* Object)
-			{
-				UPackage* Package = static_cast<UPackage*>(Object);
-				if (PackagesBefore.Contains(Package)) return;
-				if (Package->HasAnyPackageFlags(PKG_CompiledIn) || Package->GetLoadedPath().IsEmpty()) return;
-				PackagesLoadedForReport.AddUnique(Package);
-			}, false);
-		}
-
-		/** Unloads packages loaded by the report and logs any that remain loaded. */
-		void UnloadReportPackages()
-		{
-			if (PackagesLoadedForReport.Num() == 0) return;
-
-			TArray<FName> PackageNames;
-			PackageNames.Reserve(PackagesLoadedForReport.Num());
-			for (const UPackage* Package : PackagesLoadedForReport)
-			{
-				if (Package != nullptr) PackageNames.AddUnique(Package->GetFName());
-			}
-
-			// Keep the user's undo history; the report never transacts on the packages it loads.
-			UPackageTools::FUnloadPackageParams UnloadParams(PackagesLoadedForReport);
-			UnloadParams.bResetTransBuffer = false;
-			const bool bPackagesChanged = UPackageTools::UnloadPackages(UnloadParams);
-			const FText& UnloadError = UnloadParams.OutErrorMessage;
-			PackagesLoadedForReport.Reset();
-
-			TArray<FString> RemainingPackageNames;
-			for (const FName PackageName : PackageNames)
-			{
-				if (FindPackage(nullptr, *PackageName.ToString()) != nullptr)
-				{
-					RemainingPackageNames.Add(PackageName.ToString());
-				}
-			}
-
-			if (!UnloadError.IsEmpty())
-			{
-				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not unload some report packages: %s"), *UnloadError.ToString());
-			}
-			if (!bPackagesChanged)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics did not unload any of the %d report-loaded packages."), PackageNames.Num());
-			}
-			if (RemainingPackageNames.Num() > 0)
-			{
-				UE_LOG(
-					LogTemp,
-					Warning,
-					TEXT("Asset Analytics retained %d of %d report-loaded packages after unloading: %s"),
-					RemainingPackageNames.Num(),
-					PackageNames.Num(),
-					*FString::Join(RemainingPackageNames, TEXT(", ")));
-			}
-		}
-
 		/** Cancels gathering, clears unfinished results, and updates the notification. */
 		void Cancel()
 		{
@@ -540,7 +439,7 @@ namespace Mesh
 			PendingAssets.Reset();
 			AssetItems.Reset();
 			NextAssetIndex = 0;
-			UnloadReportPackages();
+			PackageUnloader.UnloadReportPackages();
 			FinishProgressNotification(
 				LOCTEXT("MeshAnalyticsCancelled", "Mesh Analytics gathering cancelled."),
 				SNotificationItem::CS_None);
@@ -552,7 +451,7 @@ namespace Mesh
 			PendingAssets.Reset();
 			AssetItems.Reset();
 			NextAssetIndex = 0;
-			PackagesLoadedForReport.Reset();
+			PackageUnloader.Reset();
 
 			const UMeshAnalyticsSettings* Settings = GetDefault<UMeshAnalyticsSettings>();
 			FARFilter Filter;
@@ -619,14 +518,14 @@ namespace Mesh
 			IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 			const UMeshAnalyticsSettings* Settings = GetDefault<UMeshAnalyticsSettings>();
 			const int32 BatchEnd = FMath::Min(NextAssetIndex + FMath::Max(Settings->AssetsPerTick, 1), PendingAssets.Num());
-			const TSet<UPackage*> PackagesBeforeBatch = GetLoadedPackages();
+			const TSet<UPackage*> PackagesBeforeBatch = Core::FReportPackageUnloader::GetLoadedPackages();
 			bool bLoadedAnyAsset = false;
 
 			for (; NextAssetIndex < BatchEnd; ++NextAssetIndex)
 			{
 				const FAssetData& AssetData = PendingAssets[NextAssetIndex];
 				if (Settings->bIgnoreUnreferencedAssets &&
-					!HasRelevantReferencer(AssetRegistry, AssetData, Settings->bIgnoreDeveloperReferences)) continue;
+					!Core::HasRelevantReferencer(AssetRegistry, AssetData, Settings->bIgnoreDeveloperReferences)) continue;
 				UObject* MeshAsset = nullptr;
 				bool bWasAssetLoaded = true;
 				if (NeedsAssetLoading(AssetData, *Settings))
@@ -637,8 +536,8 @@ namespace Mesh
 				AssetItems.Add(MakeMeshAssetData(AssetRegistry, AssetData, MeshAsset, *Settings));
 				if (!bWasAssetLoaded && MeshAsset != nullptr) bLoadedAnyAsset = true;
 			}
-			if (bLoadedAnyAsset) TrackPackagesLoadedSince(PackagesBeforeBatch);
-			UnloadReportPackages();
+			if (bLoadedAnyAsset) PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
+			PackageUnloader.UnloadReportPackages();
 			UpdateProgressNotification();
 
 			if (NextAssetIndex >= PendingAssets.Num())
@@ -763,7 +662,7 @@ namespace Mesh
 		static constexpr float NotificationDisplayDelaySeconds = 0.2f;
 		TArray<FMeshAssetData> AssetItems;
 		TArray<FAssetData> PendingAssets;
-		TArray<UPackage*> PackagesLoadedForReport;
+		Core::FReportPackageUnloader PackageUnloader;
 		FTSTicker::FDelegateHandle TickerHandle;
 		TSharedPtr<SNotificationItem> ProgressNotificationItem;
 		int32 NextAssetIndex = 0;
