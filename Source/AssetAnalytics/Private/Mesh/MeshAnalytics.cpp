@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "Mesh/MeshAnalytics.h"
-#include "Mesh/MeshAnalyticsSettings.h"
+#include "Core/AssetAnalyticsSettings.h"
 #include "Core/AssetAnalyticsPackageUnloader.h"
 #include "Core/AssetAnalyticsReportBridge.h"
 #include "Core/AssetAnalyticsUtilities.h"
@@ -64,7 +64,7 @@ namespace Mesh
 	/** Fills Item with the material and texture data enabled in Settings. */
 	static void GatherMaterialAnalyticsData(
 		const TArray<UMaterialInterface*>& Materials,
-		const UMeshAnalyticsSettings& Settings,
+		const UAssetAnalyticsSettings& Settings,
 		FMeshAssetData& Item)
 	{
 		if (Settings.bMaterialCount) Item.MaterialSlotCount = Materials.Num();
@@ -109,7 +109,7 @@ namespace Mesh
 	/** Fills Item with the enabled skeletal mesh data. */
 	static void GatherSkeletalMeshData(
 		USkeletalMesh& SkeletalMesh,
-		const UMeshAnalyticsSettings& Settings,
+		const UAssetAnalyticsSettings& Settings,
 		FMeshAssetData& Item)
 	{
 		Item.bIsSkeletalMesh = true;
@@ -164,7 +164,7 @@ namespace Mesh
 	/** Fills Item with the enabled static mesh data. */
 	static void GatherStaticMeshData(
 		UStaticMesh& StaticMesh,
-		const UMeshAnalyticsSettings& Settings,
+		const UAssetAnalyticsSettings& Settings,
 		FMeshAssetData& Item)
 	{
 		if (Settings.bLODCount) Item.LODCount = StaticMesh.GetNumLODs();
@@ -243,7 +243,7 @@ namespace Mesh
 	static void GatherAssetRegistryData(
 		IAssetRegistry& AssetRegistry,
 		const FAssetData& AssetData,
-		const UMeshAnalyticsSettings& Settings,
+		const UAssetAnalyticsSettings& Settings,
 		FMeshAssetData& Item)
 	{
 		Item.bIsSkeletalMesh = AssetData.AssetClassPath == USkeletalMesh::StaticClass()->GetClassPathName();
@@ -306,7 +306,7 @@ namespace Mesh
 	/** Returns whether the enabled columns require loading AssetData. */
 	static bool NeedsAssetLoading(
 		const FAssetData& AssetData,
-		const UMeshAnalyticsSettings& Settings)
+		const UAssetAnalyticsSettings& Settings)
 	{
 		const bool bIsSkeletalMesh = AssetData.AssetClassPath == USkeletalMesh::StaticClass()->GetClassPathName();
 		int64 CachedPhysicsSize = -1;
@@ -327,7 +327,7 @@ namespace Mesh
 		IAssetRegistry& AssetRegistry,
 		const FAssetData& AssetData,
 		UObject* MeshAsset,
-		const UMeshAnalyticsSettings& Settings)
+		const UAssetAnalyticsSettings& Settings)
 	{
 		FMeshAssetData Item(AssetData);
 		GatherAssetRegistryData(AssetRegistry, AssetData, Settings, Item);
@@ -453,7 +453,7 @@ namespace Mesh
 			NextAssetIndex = 0;
 			PackageUnloader.Reset();
 
-			const UMeshAnalyticsSettings* Settings = GetDefault<UMeshAnalyticsSettings>();
+			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
 			FARFilter Filter;
 			if (Settings->bStaticMeshes) Filter.ClassPaths.Add(UStaticMesh::StaticClass()->GetClassPathName());
 			if (Settings->bSkeletalMeshes) Filter.ClassPaths.Add(USkeletalMesh::StaticClass()->GetClassPathName());
@@ -516,7 +516,7 @@ namespace Mesh
 			FAssetRegistryModule& AssetRegistryModule =
 				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 			IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
-			const UMeshAnalyticsSettings* Settings = GetDefault<UMeshAnalyticsSettings>();
+			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
 			const int32 BatchEnd = FMath::Min(NextAssetIndex + FMath::Max(Settings->AssetsPerTick, 1), PendingAssets.Num());
 			const TSet<UPackage*> PackagesBeforeBatch = Core::FReportPackageUnloader::GetLoadedPackages();
 			bool bLoadedAnyAsset = false;
@@ -589,7 +589,7 @@ namespace Mesh
 		/** Returns CSV text containing the enabled columns and finished rows. */
 		FString BuildCsvData() const
 		{
-			const UMeshAnalyticsSettings* Settings = GetDefault<UMeshAnalyticsSettings>();
+			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
 			TArray<FString> HeaderFields;
 			HeaderFields.Add(TEXT("AssetName"));
 			HeaderFields.Add(TEXT("PackagePath"));

@@ -5,41 +5,41 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
-#include "MeshAnalyticsSettings.generated.h"
+#include "AssetAnalyticsSettings.generated.h"
 
-/** Editor settings used by the Mesh Analytics tool. */
+/** Editor settings used by the Asset Analytics reports. */
 UCLASS(config = Editor, defaultconfig, meta = (DisplayName = "Asset Analytics"))
-class ASSETANALYTICS_API UMeshAnalyticsSettings : public UDeveloperSettings
+class ASSETANALYTICS_API UAssetAnalyticsSettings : public UDeveloperSettings
 {
 	GENERATED_BODY()
 
 public:
 	/** Sets where these options appear in Editor Preferences. */
-	UMeshAnalyticsSettings();
+	UAssetAnalyticsSettings();
 
 #if WITH_EDITOR
 	/** Returns the memory-use guidance shown at the top of the settings page. */
 	virtual FText GetSectionDescription() const override;
 #endif
 
-	/** Skips mesh assets that have no relevant project references. */
-	UPROPERTY(config, EditAnywhere, Category = "Asset Filters")
+	/** Skips assets that have no relevant project references. Used by every report. */
+	UPROPERTY(config, EditAnywhere, Category = "General")
 	bool bIgnoreUnreferencedAssets = true;
 
-	/** Ignores references coming from the Developers folder. */
-	UPROPERTY(config, EditAnywhere, Category = "Asset Filters")
+	/** Ignores references coming from the Developers folder. Used by every report. */
+	UPROPERTY(config, EditAnywhere, Category = "General")
 	bool bIgnoreDeveloperReferences = true;
-	
+
+	/**
+	 * Number of assets processed per editor tick in every report. Loaded assets are unloaded after each batch,
+	 * so higher values finish faster but raise peak memory use.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "General", meta = (ClampMin = "1", UIMin = "1", UIMax = "500"))
+	int32 AssetsPerTick = 50;
+
 	/** Content Browser folders that will be searched for mesh assets. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics", meta = (ContentDir))
 	TArray<FDirectoryPath> SearchFolders;
-
-	/**
-	 * Number of mesh assets processed per editor tick. Loaded assets are unloaded after each batch,
-	 * so higher values finish faster but raise peak memory use.
-	 */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics", meta = (ClampMin = "1", UIMin = "1", UIMax = "500"))
-	int32 AssetsPerTick = 50;
 
 	/** Includes Static Mesh assets in Mesh Analytics. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Asset Types")
@@ -104,4 +104,16 @@ public:
 	/** Includes the Static Mesh lightmap resolution in the generated CSV. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Lightmap Resolution (Needs Asset Loading)"))
 	bool bLightmapResolution = false;
+
+	/** Content Browser folders that will be searched for master materials. */
+	UPROPERTY(config, EditAnywhere, Category = "Material Analytics", meta = (ContentDir))
+	TArray<FDirectoryPath> MaterialSearchFolders;
+
+	/** Includes the package size on disk in bytes. */
+	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Package Disk Size"))
+	bool bMaterialPackageDiskSize = true;
+
+	/** Includes the direct instance count and the total count including instances of instances. */
+	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Instance Counts"))
+	bool bMaterialInstanceCounts = true;
 };
