@@ -22,11 +22,11 @@ public:
 	virtual FText GetSectionDescription() const override;
 #endif
 
-	/** Skips assets that have no relevant project references. Used by every report. */
+	/** Skips assets that have no relevant project references. Used by every report; Material Analytics also leaves such instances out of the instance count. */
 	UPROPERTY(config, EditAnywhere, Category = "General")
 	bool bIgnoreUnreferencedAssets = true;
 
-	/** Ignores references coming from the Developers folder. Used by every report. */
+	/** Ignores references coming from the Developers folder when checking assets and material instances. Used by every report. */
 	UPROPERTY(config, EditAnywhere, Category = "General")
 	bool bIgnoreDeveloperReferences = true;
 
@@ -113,7 +113,14 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Package Disk Size"))
 	bool bMaterialPackageDiskSize = true;
 
-	/** Includes the direct instance count and the total count including instances of instances. */
-	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Instance Counts"))
+	/** Includes the number of instances below the material, including instances of instances. */
+	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Instance Count"))
 	bool bMaterialInstanceCounts = true;
+
+	/**
+	 * Includes how many assets of each type (static mesh, skeletal mesh, Niagara, level actor, Blueprint, ...)
+	 * use the material or any of its counted instances.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "User Type Counts"))
+	bool bMaterialUserTypeCounts = true;
 };

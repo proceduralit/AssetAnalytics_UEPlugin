@@ -4,6 +4,7 @@
 #include "AssetAnalytics.h"
 #include "Core/AssetAnalyticsReportBridge.h"
 #include "Framework/Commands/UIAction.h"
+#include "Material/MaterialAnalytics.h"
 #include "Mesh/MeshAnalytics.h"
 #include "ToolMenus.h"
 
@@ -12,7 +13,7 @@
 /** Cleans up services declared in the private implementation. */
 FAssetAnalyticsModule::~FAssetAnalyticsModule() = default;
 
-/** Starts the report service and registers the Mesh Analytics menu action. */
+/** Starts the report service and registers the report menu actions. */
 void FAssetAnalyticsModule::StartupModule()
 {
 	ReportBridge = MakeUnique<AssetAnalytics::Core::FAssetAnalyticsReportBridge>();
@@ -26,6 +27,7 @@ void FAssetAnalyticsModule::StartupModule()
 void FAssetAnalyticsModule::ShutdownModule()
 {
 	AssetAnalytics::Mesh::StopMeshAnalyticsReport();
+	AssetAnalytics::Material::StopMaterialAnalyticsReport();
 	UToolMenus::UnRegisterStartupCallback(this);
 	UToolMenus::UnregisterOwner(this);
 
@@ -36,7 +38,7 @@ void FAssetAnalyticsModule::ShutdownModule()
 	}
 }
 
-/** Adds a direct Mesh Analytics action to the editor Tools > Audit submenu. */
+/** Adds the Mesh and Material Analytics actions to the editor Tools > Audit submenu. */
 void FAssetAnalyticsModule::RegisterMenus()
 {
 	FToolMenuOwnerScoped OwnerScoped(this);
@@ -48,6 +50,12 @@ void FAssetAnalyticsModule::RegisterMenus()
 		LOCTEXT("GenerateMeshAnalyticsReportTooltip", "Gather mesh analytics, save the CSV, and open the browser report."),
 		FSlateIcon(),
 		FUIAction(FExecuteAction::CreateStatic(&AssetAnalytics::Mesh::RunMeshAnalyticsReport))));
+	Section.AddEntry(FToolMenuEntry::InitMenuEntry(
+		"GenerateMaterialAnalyticsReport",
+		LOCTEXT("GenerateMaterialAnalyticsReport", "Generate Material Analytics Report"),
+		LOCTEXT("GenerateMaterialAnalyticsReportTooltip", "Gather master material analytics and save the CSV."),
+		FSlateIcon(),
+		FUIAction(FExecuteAction::CreateStatic(&AssetAnalytics::Material::RunMaterialAnalyticsReport))));
 }
 #undef LOCTEXT_NAMESPACE
 
