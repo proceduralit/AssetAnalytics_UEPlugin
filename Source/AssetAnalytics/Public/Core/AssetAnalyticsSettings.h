@@ -118,9 +118,10 @@ public:
 	bool bMaterialInstanceCounts = true;
 
 	/**
-	 * Includes how many assets of each type (static mesh, skeletal mesh, Niagara, level actor, Blueprint, ...)
-	 * use the material or any of its counted instances.
+	 * Includes how many assets of each vertex factory type (static mesh, Nanite, skeletal mesh, Niagara, water, ...)
+	 * use the material or any of its counted instances. Only types visible in the Asset Registry are counted;
+	 * actor-based types such as water are recognised in World Partition levels only.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "User Type Counts"))
+	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Vertex Factory Counts (Registry Only)"))
 	bool bMaterialUserTypeCounts = true;
 };

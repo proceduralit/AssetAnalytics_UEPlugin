@@ -24,16 +24,23 @@ namespace AssetAnalytics
 {
 namespace Material
 {
-	/** Kinds of assets that can use a material, following the engine's material usage families. */
+	/** Kinds of assets that can use a material, following the engine's material usage (vertex factory) families. */
 	enum class EMaterialUserType : uint8
 	{
 		StaticMesh,
+		Nanite,
 		SkeletalMesh,
+		InstancedStaticMesh,
 		Niagara,
 		Particle,
 		GeometryCollection,
 		GeometryCache,
 		Groom,
+		LidarPointCloud,
+		Water,
+		VolumetricCloud,
+		HeterogeneousVolume,
+		VirtualHeightfieldMesh,
 		Level,
 		Blueprint,
 		Other,
@@ -43,16 +50,23 @@ namespace Material
 	/** CSV column names, in EMaterialUserType order. */
 	static const TCHAR* const MaterialUserTypeColumnNames[] =
 	{
-		TEXT("StaticMeshUsers"),
-		TEXT("SkeletalMeshUsers"),
-		TEXT("NiagaraUsers"),
-		TEXT("ParticleUsers"),
-		TEXT("GeometryCollectionUsers"),
-		TEXT("GeometryCacheUsers"),
-		TEXT("GroomUsers"),
-		TEXT("LevelUsers"),
-		TEXT("BlueprintUsers"),
-		TEXT("OtherUsers"),
+		TEXT("VF_StaticMesh"),
+		TEXT("VF_Nanite"),
+		TEXT("VF_SkeletalMesh"),
+		TEXT("VF_InstancedStaticMesh"),
+		TEXT("VF_Niagara"),
+		TEXT("VF_Particle"),
+		TEXT("VF_GeometryCollection"),
+		TEXT("VF_GeometryCache"),
+		TEXT("VF_Groom"),
+		TEXT("VF_LidarPointCloud"),
+		TEXT("VF_Water"),
+		TEXT("VF_VolumetricCloud"),
+		TEXT("VF_HeterogeneousVolume"),
+		TEXT("VF_VirtualHeightfieldMesh"),
+		TEXT("VF_Level"),
+		TEXT("VF_Blueprint"),
+		TEXT("VF_Other"),
 	};
 	static_assert(
 		UE_ARRAY_COUNT(MaterialUserTypeColumnNames) == static_cast<int32>(EMaterialUserType::Count),
@@ -74,18 +88,53 @@ namespace Material
 	};
 
 	/**
+	 * Decides which kind of placed World Partition actor uses a material, from the actor's class.
+	 * Input: ActorAsset is the registry entry of an actor stored under __ExternalActors__.
+	 * Returns: A specific actor-based user type, or Level for any other actor.
+	 */
+	static EMaterialUserType ClassifyPlacedActor(IAssetRegistry& AssetRegistry, const FAssetData& ActorAsset)
+	{
+		// Plugin classes are compared by path, so their modules are not needed as dependencies.
+		static const FTopLevelAssetPath ISMPartitionActorClass(TEXT("/Script/Engine"), TEXT("ISMPartitionActor"));
+		static const FTopLevelAssetPath WaterBodyClass(TEXT("/Script/Water"), TEXT("WaterBody"));
+		static const FTopLevelAssetPath WaterZoneClass(TEXT("/Script/Water"), TEXT("WaterZone"));
+		static const FTopLevelAssetPath VolumetricCloudClass(TEXT("/Script/Engine"), TEXT("VolumetricCloud"));
+		static const FTopLevelAssetPath HeterogeneousVolumeClass(TEXT("/Script/Engine"), TEXT("HeterogeneousVolume"));
+		static const FTopLevelAssetPath VirtualHeightfieldMeshClass(TEXT("/Script/VirtualHeightfieldMesh"), TEXT("VirtualHeightfieldMesh"));
+
+		// Check the actor class and its parents, so subclasses such as WaterBodyRiver or InstancedFoliageActor match too.
+		TArray<FTopLevelAssetPath> ActorClassAndAncestors;
+		AssetRegistry.GetAncestorClassNames(ActorAsset.AssetClassPath, ActorClassAndAncestors);
+		ActorClassAndAncestors.Add(ActorAsset.AssetClassPath);
+		for (const FTopLevelAssetPath& ClassPath : ActorClassAndAncestors)
+		{
+			if (ClassPath == ISMPartitionActorClass) return EMaterialUserType::InstancedStaticMesh;
+			if (ClassPath == WaterBodyClass || ClassPath == WaterZoneClass) return EMaterialUserType::Water;
+			if (ClassPath == VolumetricCloudClass) return EMaterialUserType::VolumetricCloud;
+			if (ClassPath == HeterogeneousVolumeClass) return EMaterialUserType::HeterogeneousVolume;
+			if (ClassPath == VirtualHeightfieldMeshClass) return EMaterialUserType::VirtualHeightfieldMesh;
+		}
+		return EMaterialUserType::Level;
+	}
+
+	/**
 	 * Decides which kind of asset a referencing package holds, using only registry data.
 	 * Input: ReferencerPackage is a package that references a material or material instance.
 	 * Returns: The matching user type, or Other when no rule matches.
 	 */
 	static EMaterialUserType ClassifyReferencer(IAssetRegistry& AssetRegistry, const FName ReferencerPackage)
 	{
-		// World Partition stores each placed actor in its own package under __ExternalActors__.
-		const FString PackageName = ReferencerPackage.ToString();
-		if (PackageName.Contains(FPackagePath::GetExternalActorsFolderName())) return EMaterialUserType::Level;
-
 		TArray<FAssetData> PackageAssets;
 		AssetRegistry.GetAssetsByPackageName(ReferencerPackage, PackageAssets);
+
+		// World Partition stores each placed actor in its own package under __ExternalActors__.
+		const FString PackageName = ReferencerPackage.ToString();
+		if (PackageName.Contains(FPackagePath::GetExternalActorsFolderName()))
+		{
+			return PackageAssets.Num() > 0
+				? ClassifyPlacedActor(AssetRegistry, PackageAssets[0])
+				: EMaterialUserType::Level;
+		}
 		if (PackageAssets.Num() == 0) return EMaterialUserType::Other;
 
 		// Plugin classes are compared by path, so their modules are not needed as dependencies.
@@ -96,17 +145,25 @@ namespace Material
 		static const FTopLevelAssetPath GeometryCollectionClass(TEXT("/Script/GeometryCollectionEngine"), TEXT("GeometryCollection"));
 		static const FTopLevelAssetPath GeometryCacheClass(TEXT("/Script/GeometryCache"), TEXT("GeometryCache"));
 		static const FTopLevelAssetPath GroomClass(TEXT("/Script/HairStrandsCore"), TEXT("GroomAsset"));
+		static const FTopLevelAssetPath LidarPointCloudClass(TEXT("/Script/LidarPointCloudRuntime"), TEXT("LidarPointCloud"));
 		static const FTopLevelAssetPath WorldClass(TEXT("/Script/Engine"), TEXT("World"));
 
 		const FAssetData& ReferencerAsset = PackageAssets[0];
 		const FTopLevelAssetPath& ClassPath = ReferencerAsset.AssetClassPath;
-		if (ClassPath == StaticMeshClass) return EMaterialUserType::StaticMesh;
+		if (ClassPath == StaticMeshClass)
+		{
+			// The NaniteEnabled tag is saved with every static mesh, so Nanite meshes are told apart without loading.
+			bool bNaniteEnabled = false;
+			ReferencerAsset.GetTagValue(TEXT("NaniteEnabled"), bNaniteEnabled);
+			return bNaniteEnabled ? EMaterialUserType::Nanite : EMaterialUserType::StaticMesh;
+		}
 		if (ClassPath == SkeletalMeshClass) return EMaterialUserType::SkeletalMesh;
 		if (ClassPath == NiagaraSystemClass) return EMaterialUserType::Niagara;
 		if (ClassPath == ParticleSystemClass) return EMaterialUserType::Particle;
 		if (ClassPath == GeometryCollectionClass) return EMaterialUserType::GeometryCollection;
 		if (ClassPath == GeometryCacheClass) return EMaterialUserType::GeometryCache;
 		if (ClassPath == GroomClass) return EMaterialUserType::Groom;
+		if (ClassPath == LidarPointCloudClass) return EMaterialUserType::LidarPointCloud;
 		if (ClassPath == WorldClass) return EMaterialUserType::Level;
 
 		// GetClass only finds classes that are already loaded, so no asset is loaded here.
