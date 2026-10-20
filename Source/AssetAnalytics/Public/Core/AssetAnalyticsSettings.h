@@ -113,15 +113,22 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Package Disk Size"))
 	bool bMaterialPackageDiskSize = true;
 
-	/** Includes the number of instances below the material, including instances of instances. */
+	/** Includes the number and list of instances below the material, including instances of instances. */
 	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Instance Count"))
 	bool bMaterialInstanceCounts = true;
 
 	/**
-	 * Includes how many assets of each vertex factory type (static mesh, Nanite, skeletal mesh, Niagara, water, ...)
-	 * use the material or any of its counted instances. Only types visible in the Asset Registry are counted;
-	 * actor-based types such as water are recognised in World Partition levels only.
+	 * Lists, for each material usage (vertex factory) type, the assets that use the material or any of its counted
+	 * instances. Only users visible in the Asset Registry are found; other usage types are written with null users,
+	 * and actor-based types such as water are recognised in World Partition levels only.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Vertex Factory Counts (Registry Only)"))
 	bool bMaterialUserTypeCounts = true;
+
+	/**
+	 * Adds whether each material usage flag is enabled on the master, next to its users, so unused or missing
+	 * usages stand out. Each master material is loaded and unloaded again after its batch.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Usage Flags (Needs Asset Loading)"))
+	bool bMaterialUsageFlags = false;
 };

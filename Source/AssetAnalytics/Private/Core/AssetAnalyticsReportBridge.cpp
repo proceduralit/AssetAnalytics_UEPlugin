@@ -27,11 +27,22 @@ namespace Core
 	static const TCHAR* ReportScriptRoutePath = TEXT("/asset-analytics/report/script");
 	static const TCHAR* ReportPlotlyRoutePath = TEXT("/asset-analytics/report/plotly");
 	static const TCHAR* ReportCsvRoutePath = TEXT("/asset-analytics/report/data");
+	static const TCHAR* MaterialReportPageRoutePath = TEXT("/asset-analytics/material-report/page");
+	static const TCHAR* MaterialReportStylesRoutePath = TEXT("/asset-analytics/material-report/styles");
+	static const TCHAR* MaterialReportScriptRoutePath = TEXT("/asset-analytics/material-report/script");
+	static const TCHAR* MaterialReportPlotlyRoutePath = TEXT("/asset-analytics/material-report/plotly");
+	static const TCHAR* MaterialReportJsonRoutePath = TEXT("/asset-analytics/material-report/data");
 
 	/** Returns the local URL that opens the report page. */
 	FString GetAssetAnalyticsReportUrl()
 	{
 		return FString::Printf(TEXT("http://127.0.0.1:%u%s"), ReportBridgePort, ReportPageRoutePath);
+	}
+
+	/** Returns the local URL that opens the Material Analytics report page. */
+	FString GetMaterialAnalyticsReportUrl()
+	{
+		return FString::Printf(TEXT("http://127.0.0.1:%u%s"), ReportBridgePort, MaterialReportPageRoutePath);
 	}
 
 	/** Returns true for local requests, or all requests when the engine does not expose peer addresses. */
@@ -154,6 +165,35 @@ namespace Core
 			FPaths::ProjectSavedDir(),
 			TEXT("AssetAnalytics/MeshAnalytics.csv"));
 		return HandleReportFileRequest(Request, OnComplete, FilePath, TEXT("text/csv; charset=utf-8"));
+	}
+
+	/** Serves the Material Analytics report HTML from the plugin Report folder. */
+	static bool HandleMaterialReportPageRequest(
+		const FHttpServerRequest& Request,
+		const FHttpResultCallback& OnComplete)
+	{
+		const FString FilePath = GetPluginReportPath(TEXT("Report/material/index.html"));
+		return HandleReportFileRequest(Request, OnComplete, FilePath, TEXT("text/html; charset=utf-8"));
+	}
+
+	/** Serves the Material Analytics report application script from the plugin Report folder. */
+	static bool HandleMaterialReportScriptRequest(
+		const FHttpServerRequest& Request,
+		const FHttpResultCallback& OnComplete)
+	{
+		const FString FilePath = GetPluginReportPath(TEXT("Report/material/app.js"));
+		return HandleReportFileRequest(Request, OnComplete, FilePath, TEXT("application/javascript; charset=utf-8"));
+	}
+
+	/** Serves the most recently generated Material Analytics JSON from the project Saved folder. */
+	static bool HandleMaterialReportJsonRequest(
+		const FHttpServerRequest& Request,
+		const FHttpResultCallback& OnComplete)
+	{
+		const FString FilePath = FPaths::Combine(
+			FPaths::ProjectSavedDir(),
+			TEXT("AssetAnalytics/MaterialAnalytics.json"));
+		return HandleReportFileRequest(Request, OnComplete, FilePath, TEXT("application/json; charset=utf-8"));
 	}
 
 	/** Reads an asset link from Request and selects that asset in the Content Browser. */
@@ -283,9 +323,34 @@ namespace Core
 			FHttpPath(ReportCsvRoutePath),
 			EHttpServerRequestVerbs::VERB_GET,
 			MakeReportRequestHandler<FHttpRequestHandler>(&HandleReportCsvRequest, 0));
+		// The material page uses the same relative file names, so the shared styles and Plotly handlers are reused.
+		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
+			FHttpPath(MaterialReportPageRoutePath),
+			EHttpServerRequestVerbs::VERB_GET,
+			MakeReportRequestHandler<FHttpRequestHandler>(&HandleMaterialReportPageRequest, 0)));
+		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
+			FHttpPath(MaterialReportStylesRoutePath),
+			EHttpServerRequestVerbs::VERB_GET,
+			MakeReportRequestHandler<FHttpRequestHandler>(&HandleReportStylesRequest, 0)));
+		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
+			FHttpPath(MaterialReportScriptRoutePath),
+			EHttpServerRequestVerbs::VERB_GET,
+			MakeReportRequestHandler<FHttpRequestHandler>(&HandleMaterialReportScriptRequest, 0)));
+		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
+			FHttpPath(MaterialReportPlotlyRoutePath),
+			EHttpServerRequestVerbs::VERB_GET,
+			MakeReportRequestHandler<FHttpRequestHandler>(&HandleReportPlotlyRequest, 0)));
+		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
+			FHttpPath(MaterialReportJsonRoutePath),
+			EHttpServerRequestVerbs::VERB_GET,
+			MakeReportRequestHandler<FHttpRequestHandler>(&HandleMaterialReportJsonRequest, 0)));
+		const bool bMaterialRoutesValid = !MaterialReportRoutes.ContainsByPredicate(
+			[](const TSharedPtr<const FHttpRouteHandleInternal>& Route) { return !Route.IsValid(); });
+
 		if (!SelectAssetRoute.IsValid() || !ReportPageRoute.IsValid() ||
 			!ReportStylesRoute.IsValid() || !ReportScriptRoute.IsValid() ||
-			!ReportPlotlyRoute.IsValid() || !ReportCsvRoute.IsValid())
+			!ReportPlotlyRoute.IsValid() || !ReportCsvRoute.IsValid() ||
+			!bMaterialRoutesValid)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("One or more Asset Analytics report routes could not be registered."));
 			Stop();
@@ -304,6 +369,11 @@ namespace Core
 		if (ReportHttpRouter.IsValid() && ReportScriptRoute.IsValid()) ReportHttpRouter->UnbindRoute(ReportScriptRoute);
 		if (ReportHttpRouter.IsValid() && ReportPlotlyRoute.IsValid()) ReportHttpRouter->UnbindRoute(ReportPlotlyRoute);
 		if (ReportHttpRouter.IsValid() && ReportCsvRoute.IsValid()) ReportHttpRouter->UnbindRoute(ReportCsvRoute);
+		for (const TSharedPtr<const FHttpRouteHandleInternal>& Route : MaterialReportRoutes)
+		{
+			if (ReportHttpRouter.IsValid() && Route.IsValid()) ReportHttpRouter->UnbindRoute(Route);
+		}
+		MaterialReportRoutes.Reset();
 		SelectAssetRoute.Reset();
 		ReportPageRoute.Reset();
 		ReportStylesRoute.Reset();

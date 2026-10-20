@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Material Analytics Report</title>
+    <link id="report-stylesheet" rel="stylesheet" href="../core/styles.css">
+    <script>
+        if (window.location.protocol === "http:" || window.location.protocol === "https:") {
+            document.getElementById("report-stylesheet").href = "styles";
+        }
+
+        window.addEventListener("DOMContentLoaded", () => {
+            const isEditorServed = window.location.protocol === "http:" ||
+                window.location.protocol === "https:";
+            const plotlyScript = document.createElement("script");
+            plotlyScript.src = isEditorServed ? "plotly" : "../core/plotly-basic-3.7.0.min.js";
+            plotlyScript.addEventListener("load", () => {
+                const appScript = document.createElement("script");
+                appScript.src = isEditorServed ? "script" : "app.js";
+                document.body.appendChild(appScript);
+            });
+            document.body.appendChild(plotlyScript);
+        });
+    </script>
+    <style>
+        .status-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px 20px;
+            padding-top: 14px;
+            color: #9ba4ae;
+            font-size: 14px;
+        }
+
+        .status-legend span::before {
+            content: "";
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            margin-right: 7px;
+            border-radius: 50%;
+            background: var(--swatch);
+        }
+
+        .material-details {
+            margin-top: 26px;
+            padding: 20px 22px;
+            border: 1px solid #323a43;
+            border-radius: 10px;
+            background: #171b20;
+        }
+
+        .material-details[hidden] {
+            display: none;
+        }
+
+        .material-details h2 {
+            margin: 0 0 4px;
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .material-details h3 {
+            margin: 22px 0 10px;
+            font-size: 15px;
+            font-weight: 600;
+            color: #dce2e8;
+        }
+
+        .details-path {
+            margin: 0;
+            color: #9ba4ae;
+            word-break: break-all;
+        }
+
+        .details-summary {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px 28px;
+            margin-top: 14px;
+            color: #dce2e8;
+        }
+
+        .details-summary b {
+            color: #9ba4ae;
+            font-weight: 500;
+        }
+
+        .vertex-factory-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        .vertex-factory-table th,
+        .vertex-factory-table td {
+            padding: 8px 10px;
+            border-bottom: 1px solid #2a323b;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        .vertex-factory-table th {
+            color: #9ba4ae;
+            font-weight: 500;
+        }
+
+        .status-pill {
+            display: inline-block;
+            padding: 2px 9px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .status-pill.used-not-enabled { background: #4a1f24; color: #ff9a9a; }
+        .status-pill.enabled-unused { background: #4a3a1a; color: #ffd27a; }
+        .status-pill.ok { background: #183a2c; color: #7be0b0; }
+        .status-pill.unknown { background: #252c34; color: #9ba4ae; }
+
+        .path-list summary {
+            cursor: pointer;
+            color: #dce2e8;
+        }
+
+        .path-list ul {
+            margin: 6px 0 2px;
+            padding-left: 18px;
+        }
+
+        .path-list li {
+            margin: 3px 0;
+            word-break: break-all;
+        }
+
+        .path-link {
+            padding: 0;
+            border: none;
+            background: none;
+            color: #6fbcff;
+            cursor: pointer;
+            font: inherit;
+            text-align: left;
+        }
+
+        .path-link:hover {
+            text-decoration: underline;
+        }
+
+        .path-text {
+            color: #9ba4ae;
+        }
+    </style>
+</head>
+<body>
+    <main class="report-shell">
+        <header class="report-header">
+            <div>
+                <h1>Material Analytics</h1>
+                <p id="file-summary">Choose or drop a Material Analytics JSON file to begin.</p>
+            </div>
+            <button id="choose-file" class="file-button" type="button">Choose JSON</button>
+            <input id="json-file" type="file" accept=".json,application/json" hidden>
+        </header>
+
+        <section class="filter-panel" aria-labelledby="filter-title">
+            <div class="filter-header">
+                <div>
+                    <span id="filter-title">Filters</span>
+                    <small>All active conditions must match.</small>
+                </div>
+                <button id="add-filter" type="button" disabled>Add condition</button>
+            </div>
+            <div id="filter-list"></div>
+        </section>
+
+        <section id="drop-zone" class="chart-stage" aria-label="Material Analytics scatter plot">
+            <div id="chart" aria-live="polite"></div>
+            <div id="empty-state">
+                <strong>Drop your JSON file here</strong>
+                <span>or use Choose JSON above</span>
+            </div>
+            <div id="drop-overlay" aria-hidden="true">Drop JSON to load</div>
+        </section>
+
+        <div class="status-legend" aria-label="Point colours">
+            <span style="--swatch: #ff5c6c">Used but usage not enabled</span>
+            <span style="--swatch: #ffb347">Usage enabled but unused</span>
+            <span style="--swatch: #3ecf8e">Usage flags match users</span>
+            <span style="--swatch: #36a3ff">Usage flags not checked</span>
+        </div>
+
+        <section class="asset-action" aria-label="Selected graph material">
+            <div>
+                <span>Selected material</span>
+                <strong id="selected-asset">Click a point in the graph.</strong>
+                <small id="bridge-status" role="status"></small>
+            </div>
+            <button id="show-in-content-browser" type="button" disabled>Show in Content Browser</button>
+        </section>
+
+        <section class="axis-controls" aria-label="Chart axes">
+            <div class="axis-field">
+                <label for="x-axis">X-Axis</label>
+                <select id="x-axis" disabled></select>
+            </div>
+            <div class="axis-field">
+                <label for="y-axis">Y-Axis</label>
+                <select id="y-axis" disabled></select>
+            </div>
+        </section>
+
+        <p id="status" role="status"></p>
+
+        <section id="material-details" class="material-details" aria-label="Selected material details" hidden></section>
+    </main>
+</body>
+</html>

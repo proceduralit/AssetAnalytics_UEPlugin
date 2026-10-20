@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 #include "Material/MaterialAnalytics.h"
+#include "Core/AssetAnalyticsPackageUnloader.h"
+#include "Core/AssetAnalyticsReportBridge.h"
 #include "Core/AssetAnalyticsSettings.h"
 #include "Core/AssetAnalyticsUtilities.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -9,12 +11,16 @@
 #include "Engine/Blueprint.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/PackagePath.h"
 #include "Misc/Paths.h"
+#include "Policies/PrettyJsonPrintPolicy.h"
+#include "Serialization/JsonWriter.h"
 #include "UObject/SoftObjectPath.h"
 #include "Widgets/Notifications/SNotificationList.h"
 
@@ -24,53 +30,90 @@ namespace AssetAnalytics
 {
 namespace Material
 {
-	/** Kinds of assets that can use a material, following the engine's material usage (vertex factory) families. */
+	/** Kinds of material users that can be recognised from Asset Registry data alone. */
 	enum class EMaterialUserType : uint8
 	{
 		StaticMesh,
 		Nanite,
 		SkeletalMesh,
-		InstancedStaticMesh,
+		InstancedStaticMeshes,
 		Niagara,
 		Particle,
-		GeometryCollection,
+		GeometryCollections,
 		GeometryCache,
-		Groom,
+		HairStrands,
 		LidarPointCloud,
 		Water,
 		VolumetricCloud,
-		HeterogeneousVolume,
+		HeterogeneousVolumes,
 		VirtualHeightfieldMesh,
 		Level,
 		Blueprint,
 		Other,
+		/** Also used in the vertex factory table for entries whose users cannot be found without loading. */
 		Count
 	};
 
-	/** CSV column names, in EMaterialUserType order. */
-	static const TCHAR* const MaterialUserTypeColumnNames[] =
+	/** One entry of the VertexFactories object in the JSON report. */
+	struct FVertexFactoryEntry
 	{
-		TEXT("VF_StaticMesh"),
-		TEXT("VF_Nanite"),
-		TEXT("VF_SkeletalMesh"),
-		TEXT("VF_InstancedStaticMesh"),
-		TEXT("VF_Niagara"),
-		TEXT("VF_Particle"),
-		TEXT("VF_GeometryCollection"),
-		TEXT("VF_GeometryCache"),
-		TEXT("VF_Groom"),
-		TEXT("VF_LidarPointCloud"),
-		TEXT("VF_Water"),
-		TEXT("VF_VolumetricCloud"),
-		TEXT("VF_HeterogeneousVolume"),
-		TEXT("VF_VirtualHeightfieldMesh"),
-		TEXT("VF_Level"),
-		TEXT("VF_Blueprint"),
-		TEXT("VF_Other"),
+		/** JSON key: the engine's EMaterialUsage name without MATUSAGE_, or a user type that has no usage flag. */
+		const TCHAR* Name;
+
+		/** Registry user type listed under this entry, or Count when its users are only known after loading. */
+		EMaterialUserType RegistryUserType;
+
+		/** Engine usage flag this entry reports as Enabled, or MATUSAGE_MAX for entries that are not usage flags. */
+		EMaterialUsage Usage;
 	};
-	static_assert(
-		UE_ARRAY_COUNT(MaterialUserTypeColumnNames) == static_cast<int32>(EMaterialUserType::Count),
-		"Every material user type needs a CSV column name.");
+
+	/**
+	 * Every entry written under VertexFactories: all EMaterialUsage flags in engine order,
+	 * then the user types that do not match a single usage flag.
+	 */
+	static const FVertexFactoryEntry VertexFactoryEntries[] =
+	{
+		{ TEXT("SkeletalMesh"), EMaterialUserType::SkeletalMesh, MATUSAGE_SkeletalMesh },
+		{ TEXT("ParticleSprites"), EMaterialUserType::Count, MATUSAGE_ParticleSprites },
+		{ TEXT("BeamTrails"), EMaterialUserType::Count, MATUSAGE_BeamTrails },
+		{ TEXT("MeshParticles"), EMaterialUserType::Count, MATUSAGE_MeshParticles },
+		{ TEXT("StaticLighting"), EMaterialUserType::Count, MATUSAGE_StaticLighting },
+		{ TEXT("MorphTargets"), EMaterialUserType::Count, MATUSAGE_MorphTargets },
+		{ TEXT("SplineMesh"), EMaterialUserType::Count, MATUSAGE_SplineMesh },
+		{ TEXT("InstancedStaticMeshes"), EMaterialUserType::InstancedStaticMeshes, MATUSAGE_InstancedStaticMeshes },
+		{ TEXT("GeometryCollections"), EMaterialUserType::GeometryCollections, MATUSAGE_GeometryCollections },
+		{ TEXT("Clothing"), EMaterialUserType::Count, MATUSAGE_Clothing },
+		{ TEXT("NiagaraSprites"), EMaterialUserType::Count, MATUSAGE_NiagaraSprites },
+		{ TEXT("NiagaraRibbons"), EMaterialUserType::Count, MATUSAGE_NiagaraRibbons },
+		{ TEXT("NiagaraMeshParticles"), EMaterialUserType::Count, MATUSAGE_NiagaraMeshParticles },
+		{ TEXT("GeometryCache"), EMaterialUserType::GeometryCache, MATUSAGE_GeometryCache },
+		{ TEXT("Water"), EMaterialUserType::Water, MATUSAGE_Water },
+		{ TEXT("HairStrands"), EMaterialUserType::HairStrands, MATUSAGE_HairStrands },
+		{ TEXT("LidarPointCloud"), EMaterialUserType::LidarPointCloud, MATUSAGE_LidarPointCloud },
+		{ TEXT("VirtualHeightfieldMesh"), EMaterialUserType::VirtualHeightfieldMesh, MATUSAGE_VirtualHeightfieldMesh },
+		{ TEXT("Nanite"), EMaterialUserType::Nanite, MATUSAGE_Nanite },
+		{ TEXT("Voxels"), EMaterialUserType::Count, MATUSAGE_Voxels },
+		{ TEXT("VolumetricCloud"), EMaterialUserType::VolumetricCloud, MATUSAGE_VolumetricCloud },
+		{ TEXT("HeterogeneousVolumes"), EMaterialUserType::HeterogeneousVolumes, MATUSAGE_HeterogeneousVolumes },
+		{ TEXT("StaticMesh"), EMaterialUserType::StaticMesh, MATUSAGE_StaticMesh },
+		{ TEXT("EditorCompositing"), EMaterialUserType::Count, MATUSAGE_EditorCompositing },
+		{ TEXT("NeuralNetworks"), EMaterialUserType::Count, MATUSAGE_NeuralNetworks },
+		{ TEXT("MeshDeformer"), EMaterialUserType::Count, MATUSAGE_MeshDeformer },
+		{ TEXT("Niagara"), EMaterialUserType::Niagara, MATUSAGE_MAX },
+		{ TEXT("Particle"), EMaterialUserType::Particle, MATUSAGE_MAX },
+		{ TEXT("Level"), EMaterialUserType::Level, MATUSAGE_MAX },
+		{ TEXT("Blueprint"), EMaterialUserType::Blueprint, MATUSAGE_MAX },
+		{ TEXT("Other"), EMaterialUserType::Other, MATUSAGE_MAX },
+	};
+
+	/** A classified asset that references a material or one of its instances. */
+	struct FMaterialUser
+	{
+		EMaterialUserType Type = EMaterialUserType::Other;
+
+		/** Object path shown in the report, or the package name when the package has no registry asset. */
+		FString Path;
+	};
 
 	struct FMaterialAssetData
 	{
@@ -82,9 +125,15 @@ namespace Material
 
 		FAssetData AssetData;
 		int64 PackageDiskSize = -1;
-		int32 InstanceCount = INDEX_NONE;
-		/** Number of distinct assets of each EMaterialUserType that use the material. Empty when not gathered. */
-		TArray<int32> UserCounts;
+
+		/** Counted instances below the material, including instances of instances. */
+		TArray<FAssetData> Instances;
+
+		/** User paths for each EMaterialUserType, sorted. Empty when users were not gathered. */
+		TArray<TArray<FString>> UserPathsByType;
+
+		/** Whether each EMaterialUsage flag is enabled on the master. Empty when the master was not read. */
+		TArray<bool> UsageEnabled;
 	};
 
 	/**
@@ -108,10 +157,10 @@ namespace Material
 		ActorClassAndAncestors.Add(ActorAsset.AssetClassPath);
 		for (const FTopLevelAssetPath& ClassPath : ActorClassAndAncestors)
 		{
-			if (ClassPath == ISMPartitionActorClass) return EMaterialUserType::InstancedStaticMesh;
+			if (ClassPath == ISMPartitionActorClass) return EMaterialUserType::InstancedStaticMeshes;
 			if (ClassPath == WaterBodyClass || ClassPath == WaterZoneClass) return EMaterialUserType::Water;
 			if (ClassPath == VolumetricCloudClass) return EMaterialUserType::VolumetricCloud;
-			if (ClassPath == HeterogeneousVolumeClass) return EMaterialUserType::HeterogeneousVolume;
+			if (ClassPath == HeterogeneousVolumeClass) return EMaterialUserType::HeterogeneousVolumes;
 			if (ClassPath == VirtualHeightfieldMeshClass) return EMaterialUserType::VirtualHeightfieldMesh;
 		}
 		return EMaterialUserType::Level;
@@ -122,11 +171,11 @@ namespace Material
 	 * Input: ReferencerPackage is a package that references a material or material instance.
 	 * Returns: The matching user type, or Other when no rule matches.
 	 */
-	static EMaterialUserType ClassifyReferencer(IAssetRegistry& AssetRegistry, const FName ReferencerPackage)
+	static EMaterialUserType ClassifyReferencer(
+		IAssetRegistry& AssetRegistry,
+		const FName ReferencerPackage,
+		const TArray<FAssetData>& PackageAssets)
 	{
-		TArray<FAssetData> PackageAssets;
-		AssetRegistry.GetAssetsByPackageName(ReferencerPackage, PackageAssets);
-
 		// World Partition stores each placed actor in its own package under __ExternalActors__.
 		const FString PackageName = ReferencerPackage.ToString();
 		if (PackageName.Contains(FPackagePath::GetExternalActorsFolderName()))
@@ -160,9 +209,9 @@ namespace Material
 		if (ClassPath == SkeletalMeshClass) return EMaterialUserType::SkeletalMesh;
 		if (ClassPath == NiagaraSystemClass) return EMaterialUserType::Niagara;
 		if (ClassPath == ParticleSystemClass) return EMaterialUserType::Particle;
-		if (ClassPath == GeometryCollectionClass) return EMaterialUserType::GeometryCollection;
+		if (ClassPath == GeometryCollectionClass) return EMaterialUserType::GeometryCollections;
 		if (ClassPath == GeometryCacheClass) return EMaterialUserType::GeometryCache;
-		if (ClassPath == GroomClass) return EMaterialUserType::Groom;
+		if (ClassPath == GroomClass) return EMaterialUserType::HairStrands;
 		if (ClassPath == LidarPointCloudClass) return EMaterialUserType::LidarPointCloud;
 		if (ClassPath == WorldClass) return EMaterialUserType::Level;
 
@@ -170,6 +219,31 @@ namespace Material
 		const UClass* AssetClass = ReferencerAsset.GetClass();
 		if (AssetClass != nullptr && AssetClass->IsChildOf(UBlueprint::StaticClass())) return EMaterialUserType::Blueprint;
 		return EMaterialUserType::Other;
+	}
+
+	/**
+	 * Classifies a referencing package and picks the path shown for it in the report.
+	 * Returns: The user's type and its object path, or its package name when the registry has no asset for it.
+	 */
+	static FMaterialUser MakeMaterialUser(IAssetRegistry& AssetRegistry, const FName ReferencerPackage)
+	{
+		TArray<FAssetData> PackageAssets;
+		AssetRegistry.GetAssetsByPackageName(ReferencerPackage, PackageAssets);
+
+		FMaterialUser User;
+		User.Type = ClassifyReferencer(AssetRegistry, ReferencerPackage, PackageAssets);
+		User.Path = PackageAssets.Num() > 0
+			? PackageAssets[0].GetObjectPathString()
+			: ReferencerPackage.ToString();
+		return User;
+	}
+
+	/** Returns the object path of InstanceData's parent material, read from its registry tag. */
+	static FString GetParentPath(const FAssetData& InstanceData)
+	{
+		FString ParentExportTextPath;
+		InstanceData.GetTagValue(TEXT("Parent"), ParentExportTextPath);
+		return FPackageName::ExportTextPathToObjectPath(ParentExportTextPath);
 	}
 
 	/** Returns whether PackageName is inside the project's Developers folder. */
@@ -204,6 +278,7 @@ namespace Material
 				TickerHandle.Reset();
 			}
 			ResetReportData();
+			PackageUnloader.UnloadReportPackages();
 			DismissProgressNotification();
 		}
 
@@ -276,7 +351,7 @@ namespace Material
 			AssetItems.Reset();
 			ChildInstancesByParent.Reset();
 			InstancePackages.Reset();
-			UserTypeByPackage.Reset();
+			UserByPackage.Reset();
 			NextAssetIndex = 0;
 		}
 
@@ -289,6 +364,7 @@ namespace Material
 				TickerHandle.Reset();
 			}
 			ResetReportData();
+			PackageUnloader.UnloadReportPackages();
 			FinishProgressNotification(
 				LOCTEXT("MaterialAnalyticsCancelled", "Material Analytics gathering cancelled."),
 				SNotificationItem::CS_None);
@@ -310,10 +386,7 @@ namespace Material
 				true);
 			for (const FAssetData& MaterialInstance : MaterialInstances)
 			{
-				FString ParentExportTextPath;
-				if (!MaterialInstance.GetTagValue(TEXT("Parent"), ParentExportTextPath)) continue;
-
-				const FSoftObjectPath ParentPath(FPackageName::ExportTextPathToObjectPath(ParentExportTextPath));
+				const FSoftObjectPath ParentPath(GetParentPath(MaterialInstance));
 				if (ParentPath.IsNull()) continue;
 				ChildInstancesByParent.FindOrAdd(ParentPath).Add(MaterialInstance);
 				InstancePackages.Add(MaterialInstance.PackageName);
@@ -358,11 +431,11 @@ namespace Material
 		}
 
 		/**
-		 * Counts the distinct assets of each user type that reference the master or its counted instances.
-		 * Material instances are skipped because the instance count already covers them.
-		 * Output: Fills Item.UserCounts, one entry per EMaterialUserType.
+		 * Finds the distinct assets of each user type that reference the master or its counted instances.
+		 * Material instances are skipped because the instance list already covers them.
+		 * Output: Fills Item.UserPathsByType, one sorted list per EMaterialUserType.
 		 */
-		void CountUsersByType(
+		void GatherUsersByType(
 			IAssetRegistry& AssetRegistry,
 			const TArray<FAssetData>& MaterialAndInstances,
 			const UAssetAnalyticsSettings& Settings,
@@ -385,14 +458,18 @@ namespace Material
 				}
 			}
 
-			Item.UserCounts.Init(0, static_cast<int32>(EMaterialUserType::Count));
+			Item.UserPathsByType.SetNum(static_cast<int32>(EMaterialUserType::Count));
 			for (const FName UserPackage : UserPackages)
 			{
-				const EMaterialUserType* CachedUserType = UserTypeByPackage.Find(UserPackage);
-				const EMaterialUserType UserType = CachedUserType != nullptr
-					? *CachedUserType
-					: UserTypeByPackage.Add(UserPackage, ClassifyReferencer(AssetRegistry, UserPackage));
-				++Item.UserCounts[static_cast<int32>(UserType)];
+				const FMaterialUser* CachedUser = UserByPackage.Find(UserPackage);
+				const FMaterialUser& User = CachedUser != nullptr
+					? *CachedUser
+					: UserByPackage.Add(UserPackage, MakeMaterialUser(AssetRegistry, UserPackage));
+				Item.UserPathsByType[static_cast<int32>(User.Type)].Add(User.Path);
+			}
+			for (TArray<FString>& UserPaths : Item.UserPathsByType)
+			{
+				UserPaths.Sort();
 			}
 		}
 
@@ -400,6 +477,7 @@ namespace Material
 		void BeginGatheringAssets()
 		{
 			ResetReportData();
+			PackageUnloader.Reset();
 
 			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
 			FARFilter Filter;
@@ -459,7 +537,30 @@ namespace Material
 		}
 
 		/**
-		 * Fills report rows for the next batch of master materials from registry data.
+		 * Loads AssetData's master material and records which usage flags it has enabled.
+		 * Output: Fills Item.UsageEnabled, or leaves it empty when the material cannot be loaded.
+		 * Returns: True when this call loaded the material from disk.
+		 */
+		static bool ReadUsageFlags(const FAssetData& AssetData, FMaterialAssetData& Item)
+		{
+			const bool bWasAssetLoaded = AssetData.IsAssetLoaded();
+			const UMaterial* MasterMaterial = Cast<UMaterial>(AssetData.GetAsset());
+			if (MasterMaterial == nullptr)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material %s to read its usage flags."), *AssetData.GetObjectPathString());
+				return false;
+			}
+
+			Item.UsageEnabled.SetNum(MATUSAGE_MAX);
+			for (int32 UsageIndex = 0; UsageIndex < MATUSAGE_MAX; ++UsageIndex)
+			{
+				Item.UsageEnabled[UsageIndex] = MasterMaterial->GetUsageByFlag(static_cast<EMaterialUsage>(UsageIndex));
+			}
+			return !bWasAssetLoaded;
+		}
+
+		/**
+		 * Fills report rows for the next batch of master materials, loading them only when usage flags are enabled.
 		 * Returns: True while more assets are waiting.
 		 */
 		bool Tick(float)
@@ -469,6 +570,12 @@ namespace Material
 			IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
 			const int32 BatchEnd = FMath::Min(NextAssetIndex + FMath::Max(Settings->AssetsPerTick, 1), PendingAssets.Num());
+
+			// Snapshot loaded packages so everything this batch loads, including dependencies, can be unloaded afterwards.
+			const double BatchStartSeconds = FPlatformTime::Seconds();
+			TSet<UPackage*> PackagesBeforeBatch;
+			if (Settings->bMaterialUsageFlags) PackagesBeforeBatch = Core::FReportPackageUnloader::GetLoadedPackages();
+			int32 LoadedMaterialCount = 0;
 
 			for (; NextAssetIndex < BatchEnd; ++NextAssetIndex)
 			{
@@ -488,15 +595,26 @@ namespace Material
 				}
 				if (Settings->bMaterialInstanceCounts || Settings->bMaterialUserTypeCounts)
 				{
-					TArray<FAssetData> MaterialAndInstances =
-						GatherCountedInstances(AssetRegistry, AssetData.GetSoftObjectPath(), *Settings);
-					Item.InstanceCount = MaterialAndInstances.Num();
+					Item.Instances = GatherCountedInstances(AssetRegistry, AssetData.GetSoftObjectPath(), *Settings);
 					if (Settings->bMaterialUserTypeCounts)
 					{
+						TArray<FAssetData> MaterialAndInstances = Item.Instances;
 						MaterialAndInstances.Add(AssetData);
-						CountUsersByType(AssetRegistry, MaterialAndInstances, *Settings, Item);
+						GatherUsersByType(AssetRegistry, MaterialAndInstances, *Settings, Item);
 					}
 				}
+				if (Settings->bMaterialUsageFlags && ReadUsageFlags(AssetData, Item)) ++LoadedMaterialCount;
+			}
+			if (LoadedMaterialCount > 0)
+			{
+				PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
+				PackageUnloader.UnloadReportPackages();
+				UE_LOG(
+					LogTemp,
+					Log,
+					TEXT("Material Analytics loaded and unloaded %d master materials in %.2f s."),
+					LoadedMaterialCount,
+					FPlatformTime::Seconds() - BatchStartSeconds);
 			}
 			UpdateProgressNotification();
 
@@ -509,7 +627,7 @@ namespace Material
 			return true;
 		}
 
-		/** Sorts the results and saves the CSV. The browser report is added in a later step. */
+		/** Sorts the results, saves the JSON report, and opens the browser report. */
 		void CompleteReport()
 		{
 			AssetItems.Sort([](const FMaterialAssetData& Left, const FMaterialAssetData& Right)
@@ -524,63 +642,126 @@ namespace Material
 				FPaths::ProjectSavedDir(),
 				TEXT("AssetAnalytics"));
 			IFileManager::Get().MakeDirectory(*ReportDirectory, true);
-			const FString CsvPath = FPaths::Combine(ReportDirectory, TEXT("MaterialAnalytics.csv"));
+			const FString JsonPath = FPaths::Combine(ReportDirectory, TEXT("MaterialAnalytics.json"));
 			if (!FFileHelper::SaveStringToFile(
-				BuildCsvData(),
-				*CsvPath,
+				BuildJsonData(),
+				*JsonPath,
 				FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 			{
 				FinishProgressNotification(
-					LOCTEXT("MaterialCsvSaveFailed", "The material analytics CSV file could not be saved."),
+					LOCTEXT("MaterialJsonSaveFailed", "The material analytics JSON file could not be saved."),
 					SNotificationItem::CS_Fail);
 				ResetReportData();
 				return;
 			}
 
-			UE_LOG(LogTemp, Log, TEXT("Asset Analytics saved the Material Analytics CSV to %s"), *FPaths::ConvertRelativePathToFull(CsvPath));
+			UE_LOG(LogTemp, Log, TEXT("Asset Analytics saved the Material Analytics report to %s"), *FPaths::ConvertRelativePathToFull(JsonPath));
+			const FString ReportUrl = Core::GetMaterialAnalyticsReportUrl();
+			FPlatformProcess::LaunchURL(*ReportUrl, nullptr, nullptr);
 			FinishProgressNotification(
 				FText::Format(
-					LOCTEXT("MaterialAnalyticsComplete", "Material Analytics CSV saved for {0} master materials."),
+					LOCTEXT("MaterialAnalyticsComplete", "Material Analytics report saved for {0} master materials."),
 					FText::AsNumber(AssetItems.Num())),
 				SNotificationItem::CS_Success);
 			ResetReportData();
 		}
 
-		/** Returns CSV text containing the enabled columns and finished rows. */
-		FString BuildCsvData() const
+		/**
+		 * Writes one material entry with the enabled fields.
+		 * Output: Appends a JSON object to Writer, which must be inside the Materials array.
+		 */
+		static void WriteMaterialJson(
+			TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>& Writer,
+			const FMaterialAssetData& Item,
+			const UAssetAnalyticsSettings& Settings)
+		{
+			Writer.WriteObjectStart();
+			Writer.WriteValue(TEXT("AssetName"), Item.AssetData.AssetName.ToString());
+			Writer.WriteValue(TEXT("PackagePath"), Item.AssetData.PackagePath.ToString());
+			if (Settings.bMaterialPackageDiskSize)
+			{
+				if (Item.PackageDiskSize >= 0) Writer.WriteValue(TEXT("PackageDiskSize"), Item.PackageDiskSize);
+				else Writer.WriteNull(TEXT("PackageDiskSize"));
+			}
+			if (Settings.bMaterialInstanceCounts)
+			{
+				Writer.WriteValue(TEXT("InstanceCount"), Item.Instances.Num());
+				Writer.WriteArrayStart(TEXT("Instances"));
+				for (const FAssetData& Instance : Item.Instances)
+				{
+					Writer.WriteValue(Instance.GetObjectPathString());
+				}
+				Writer.WriteArrayEnd();
+			}
+			if (Settings.bMaterialUsageFlags)
+			{
+				// False when the master could not be loaded, so missing Enabled values are not read as "disabled".
+				Writer.WriteValue(TEXT("UsageFlagsRead"), Item.UsageEnabled.Num() > 0);
+			}
+			if (Settings.bMaterialUserTypeCounts || Settings.bMaterialUsageFlags)
+			{
+				Writer.WriteObjectStart(TEXT("VertexFactories"));
+				for (const FVertexFactoryEntry& Entry : VertexFactoryEntries)
+				{
+					WriteVertexFactoryJson(Writer, Entry, Item);
+				}
+				Writer.WriteObjectEnd();
+			}
+			Writer.WriteObjectEnd();
+		}
+
+		/**
+		 * Writes one VertexFactories entry when it has something to show: users, or an enabled usage flag.
+		 * Users is written only when the registry can find users of this type, so an empty list means "enabled
+		 * but unused" and a missing Users key means the users are unknown without loading them.
+		 * Output: Appends Entry.Name and its object to Writer, or nothing when the entry is skipped.
+		 */
+		static void WriteVertexFactoryJson(
+			TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>& Writer,
+			const FVertexFactoryEntry& Entry,
+			const FMaterialAssetData& Item)
+		{
+			const bool bHasUsageFlag = Entry.Usage != MATUSAGE_MAX && Item.UsageEnabled.Num() > 0;
+			const bool bEnabled = bHasUsageFlag && Item.UsageEnabled[Entry.Usage];
+			const bool bUsersKnown =
+				Entry.RegistryUserType != EMaterialUserType::Count && Item.UserPathsByType.Num() > 0;
+			const TArray<FString>* UserPaths = bUsersKnown
+				? &Item.UserPathsByType[static_cast<int32>(Entry.RegistryUserType)]
+				: nullptr;
+			const bool bHasUsers = UserPaths != nullptr && UserPaths->Num() > 0;
+			if (!bHasUsers && !bEnabled) return;
+
+			Writer.WriteObjectStart(Entry.Name);
+			if (bHasUsageFlag) Writer.WriteValue(TEXT("Enabled"), bEnabled);
+			if (UserPaths != nullptr)
+			{
+				Writer.WriteArrayStart(TEXT("Users"));
+				for (const FString& UserPath : *UserPaths)
+				{
+					Writer.WriteValue(UserPath);
+				}
+				Writer.WriteArrayEnd();
+			}
+			Writer.WriteObjectEnd();
+		}
+
+		/** Returns the JSON report text for the finished materials and the enabled fields. */
+		FString BuildJsonData() const
 		{
 			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
-			TArray<FString> HeaderFields;
-			HeaderFields.Add(TEXT("AssetName"));
-			HeaderFields.Add(TEXT("PackagePath"));
-			if (Settings->bMaterialPackageDiskSize) HeaderFields.Add(TEXT("PackageDiskSize"));
-			if (Settings->bMaterialInstanceCounts) HeaderFields.Add(TEXT("Instances"));
-			if (Settings->bMaterialUserTypeCounts)
-			{
-				for (const TCHAR* ColumnName : MaterialUserTypeColumnNames)
-				{
-					HeaderFields.Add(ColumnName);
-				}
-			}
-
-			FString CsvData = FString::Join(HeaderFields, TEXT(",")) + TEXT("\r\n");
+			FString JsonText;
+			const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
+				TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
+			Writer->WriteObjectStart();
+			Writer->WriteArrayStart(TEXT("Materials"));
 			for (const FMaterialAssetData& Item : AssetItems)
 			{
-				TArray<FString> RowFields;
-				RowFields.Add(Core::EscapeCsvField(Item.AssetData.AssetName.ToString()));
-				RowFields.Add(Core::EscapeCsvField(Item.AssetData.PackagePath.ToString()));
-				if (Settings->bMaterialPackageDiskSize) RowFields.Add(Core::CsvNumberOrEmpty(Item.PackageDiskSize));
-				if (Settings->bMaterialInstanceCounts) RowFields.Add(Core::CsvNumberOrEmpty(Item.InstanceCount));
-				if (Settings->bMaterialUserTypeCounts)
-				{
-					for (const int32 UserCount : Item.UserCounts)
-					{
-						RowFields.Add(Core::CsvNumberOrEmpty(UserCount));
-					}
-				}
-				CsvData += FString::Join(RowFields, TEXT(",")) + TEXT("\r\n");
+				WriteMaterialJson(*Writer, Item, *Settings);
 			}
-			return CsvData;
+			Writer->WriteArrayEnd();
+			Writer->WriteObjectEnd();
+			Writer->Close();
+			return JsonText;
 		}
 
 		static constexpr float NotificationDisplayDelaySeconds = 0.2f;
@@ -590,8 +771,10 @@ namespace Material
 		TMap<FSoftObjectPath, TArray<FAssetData>> ChildInstancesByParent;
 		/** Packages of every material instance in the instance tree, so they are not counted as users. */
 		TSet<FName> InstancePackages;
-		/** User type of each referencing package classified so far in this run. */
-		TMap<FName, EMaterialUserType> UserTypeByPackage;
+		/** Type and report path of each referencing package classified so far in this run. */
+		TMap<FName, FMaterialUser> UserByPackage;
+		/** Unloads the master materials loaded to read usage flags, after each batch. */
+		Core::FReportPackageUnloader PackageUnloader;
 		FTSTicker::FDelegateHandle TickerHandle;
 		TSharedPtr<SNotificationItem> ProgressNotificationItem;
 		int32 NextAssetIndex = 0;

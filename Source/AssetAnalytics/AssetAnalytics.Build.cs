@@ -46,6 +46,7 @@ public class AssetAnalytics : ModuleRules
 				"AssetRegistry",
 				"ContentBrowser",
 				"HTTPServer",
+				"Json",
 				"Sockets",
 				"ToolMenus",
 				// ... add private dependencies that you statically link with here ...	

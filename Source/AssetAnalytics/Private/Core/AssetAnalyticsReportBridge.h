@@ -15,6 +15,9 @@ namespace Core
 	/** Returns the local URL for the Mesh Analytics report. */
 	FString GetAssetAnalyticsReportUrl();
 
+	/** Returns the local URL for the Material Analytics report. */
+	FString GetMaterialAnalyticsReportUrl();
+
 	/** Serves the report files and handles asset links from the browser. */
 	class FAssetAnalyticsReportBridge
 	{
@@ -46,6 +49,9 @@ namespace Core
 
 		/** Registered route that serves the generated Mesh Analytics CSV. */
 		TSharedPtr<const FHttpRouteHandleInternal> ReportCsvRoute;
+
+		/** Registered routes that serve the Material Analytics page, its files, and its JSON data. */
+		TArray<TSharedPtr<const FHttpRouteHandleInternal>> MaterialReportRoutes;
 	};
 }
 }
