@@ -25,15 +25,31 @@
         notChecked: { label: "Not checked", className: "unknown", color: "#36a3ff", border: "#b9ddff" }
     };
 
-    const preferredLabels = {
-        PackageDiskSize: "Package Disk Size (bytes)",
-        InstanceCount: "Instances",
-        TotalUsers: "Total Users",
-        UsageStatus: "Usage Status",
-        EnabledUsageFlags: "Enabled Usage Flags",
-        UsedNotEnabledFlags: "Used but Not Enabled Flags",
-        EnabledUnusedFlags: "Enabled but Unused Flags"
-    };
+    // Every value offered in the graph menus. "axis" adds it to the X/Y menus, "filter" to the filter menu.
+    // Types: "number", "string" (pick from values), or "list" (a material matches if any of its values is picked).
+    // A column is hidden when no material in the file has a value for it.
+    const columns = [
+        { key: "PackageDiskSize", label: "Package Disk Size (bytes)", type: "number", axis: true, filter: true,
+            value: material => material.PackageDiskSize },
+        { key: "InstanceCount", label: "Instances", type: "number", axis: true, filter: true,
+            value: material => material.InstanceCount },
+        { key: "TotalUsers", label: "Total Users", type: "number", axis: true, filter: true,
+            value: material => hasUsers(material) ? countUsers(material) : undefined },
+        { key: "EnabledUsageFlags", label: "Enabled Usage Flags", type: "number", axis: true, filter: true,
+            value: material => material.UsageFlagsRead ? summarizeUsage(material).enabledCount : undefined },
+        { key: "UsedNotEnabledFlags", label: "Used but Not Enabled Flags", type: "number", axis: true, filter: true,
+            value: material => material.UsageFlagsRead ? summarizeUsage(material).usedNotEnabledCount : undefined },
+        { key: "EnabledUnusedFlags", label: "Enabled but Unused Flags", type: "number", axis: true, filter: true,
+            value: material => material.UsageFlagsRead ? summarizeUsage(material).enabledUnusedCount : undefined },
+        { key: "UsageStatus", label: "Usage Status", type: "string", filter: true,
+            value: material => summarizeUsage(material).status.label },
+        { key: "PackagePath", label: "Package Path", type: "string", filter: true,
+            value: material => material.PackagePath },
+        { key: "UsedByVertexFactory", label: "Used by Vertex Factory", type: "list", filter: true,
+            value: material => vertexFactoryNames(material, entry => entry.Users?.length > 0) },
+        { key: "EnabledUsageFlag", label: "Usage Flag Enabled", type: "list", filter: true,
+            value: material => vertexFactoryNames(material, entry => entry.Enabled === true) }
+    ];
 
     let materials = [];
     let rows = [];
@@ -164,17 +180,17 @@
             throw new Error("The local Plotly library could not be loaded.");
         }
 
-        const flattened = flattenMaterials(report.Materials);
-        const detectedColumns = detectColumns(flattened.headers, flattened.rows);
-        const detectedMetrics = detectedColumns.filter(column => column.type !== "string");
-        if (detectedMetrics.length < 2) {
+        const builtRows = buildRows(report.Materials);
+        const availableColumns = columns.filter(column => builtRows.some(row => hasValue(row[column.key])));
+        const availableMetrics = availableColumns.filter(column => column.axis);
+        if (availableMetrics.length < 2) {
             throw new Error("The report needs at least two numeric values per material to draw a graph.");
         }
 
         materials = report.Materials;
-        rows = flattened.rows;
-        metrics = detectedMetrics;
-        filterColumns = detectedColumns.filter(column => column.key !== "AssetName");
+        rows = builtRows;
+        metrics = availableMetrics;
+        filterColumns = availableColumns.filter(column => column.filter);
         populateAxisSelects();
         const hasFilterColumns = resetFilterConditions();
         fileSummary.textContent = `${fileName} · ${rows.length.toLocaleString()} materials`;
@@ -185,77 +201,44 @@
         renderChart();
     }
 
-    // Turns each material into a flat row of text values, so the graph and filters work the same as the mesh report.
-    function flattenMaterials(reportMaterials) {
-        const userKeys = [];
-        const enabledKeys = [];
-        reportMaterials.forEach(material => {
-            Object.entries(material.VertexFactories ?? {}).forEach(([key, entry]) => {
-                if (Array.isArray(entry.Users) && !userKeys.includes(key)) {
-                    userKeys.push(key);
-                }
-                if (typeof entry.Enabled === "boolean" && !enabledKeys.includes(key)) {
-                    enabledKeys.push(key);
-                }
-            });
-        });
-        const anyUsageRead = reportMaterials.some(material => material.UsageFlagsRead === true);
-
-        const headers = ["AssetName", "PackagePath", "UsageStatus"];
-        if (reportMaterials.some(material => "PackageDiskSize" in material)) headers.push("PackageDiskSize");
-        if (reportMaterials.some(material => "InstanceCount" in material)) headers.push("InstanceCount");
-        if (userKeys.length > 0) headers.push("TotalUsers");
-        if (anyUsageRead) headers.push("EnabledUsageFlags", "UsedNotEnabledFlags", "EnabledUnusedFlags");
-        userKeys.forEach(key => headers.push(usersColumn(key)));
-        enabledKeys.forEach(key => headers.push(enabledColumn(key)));
-        userKeys.forEach(key => {
-            preferredLabels[usersColumn(key)] = `${splitHeader(key)} Users`;
-        });
-        enabledKeys.forEach(key => {
-            preferredLabels[enabledColumn(key)] = `${splitHeader(key)} Enabled`;
-        });
-
-        const flattenedRows = reportMaterials.map((material, materialIndex) => {
-            const vertexFactories = material.VertexFactories ?? {};
-            const summary = summarizeUsage(material);
+    // Builds one row per material with the values of every column, so the graph and filters can read them.
+    // Numbers and strings are stored as text like the mesh report; list columns keep an array of names.
+    function buildRows(reportMaterials) {
+        return reportMaterials.map((material, materialIndex) => {
             const row = {
                 materialIndex,
-                AssetName: String(material.AssetName ?? ""),
-                PackagePath: String(material.PackagePath ?? ""),
-                UsageStatus: summary.status.label,
-                PackageDiskSize: textOf(material.PackageDiskSize),
-                InstanceCount: textOf(material.InstanceCount),
-                TotalUsers: String(Object.values(vertexFactories)
-                    .reduce((total, entry) => total + (entry.Users?.length ?? 0), 0)),
-                EnabledUsageFlags: material.UsageFlagsRead ? String(summary.enabledCount) : "",
-                UsedNotEnabledFlags: material.UsageFlagsRead ? String(summary.usedNotEnabledCount) : "",
-                EnabledUnusedFlags: material.UsageFlagsRead ? String(summary.enabledUnusedCount) : ""
+                AssetName: String(material.AssetName ?? "")
             };
-            userKeys.forEach(key => {
-                const entry = vertexFactories[key];
-                // A missing entry means no users; an entry without Users means its users are unknown.
-                row[usersColumn(key)] = !entry ? "0" : Array.isArray(entry.Users) ? String(entry.Users.length) : "";
-            });
-            enabledKeys.forEach(key => {
-                const entry = vertexFactories[key];
-                row[enabledColumn(key)] = !material.UsageFlagsRead ? "" : entry?.Enabled === true ? "True" : "False";
+            columns.forEach(column => {
+                const value = column.value(material);
+                if (column.type === "list") {
+                    row[column.key] = value ?? [];
+                } else {
+                    row[column.key] = value === undefined || value === null ? "" : String(value);
+                }
             });
             return row;
         });
-
-        return { headers, rows: flattenedRows };
     }
 
-    function usersColumn(key) {
-        return `VF_${key}_Users`;
+    function hasValue(value) {
+        return Array.isArray(value) ? value.length > 0 : value !== undefined && value.trim() !== "";
     }
 
-    function enabledColumn(key) {
-        return `VF_${key}_Enabled`;
+    function hasUsers(material) {
+        return Object.values(material.VertexFactories ?? {}).some(entry => Array.isArray(entry.Users));
     }
 
-    function textOf(value) {
-        return value === undefined || value === null ? "" : String(value);
+    function countUsers(material) {
+        return Object.values(material.VertexFactories ?? {})
+            .reduce((total, entry) => total + (entry.Users?.length ?? 0), 0);
+    }
+
+    // Returns the readable names of the VertexFactories entries that pass isIncluded.
+    function vertexFactoryNames(material, isIncluded) {
+        return Object.entries(material.VertexFactories ?? {})
+            .filter(([, entry]) => isIncluded(entry))
+            .map(([key]) => splitHeader(key));
     }
 
     // Returns the status of one VertexFactories entry, or null when it has no usage flag to compare.
@@ -302,26 +285,6 @@
             overallStatus = usageStatuses.enabledUnused;
         }
         return { status: overallStatus, enabledCount, usedNotEnabledCount, enabledUnusedCount };
-    }
-
-    function detectColumns(headers, parsedRows) {
-        return headers.flatMap(header => {
-            const values = parsedRows
-                .map(row => (row[header] ?? "").trim())
-                .filter(value => value !== "");
-
-            if (values.length === 0) {
-                return [];
-            }
-
-            const isBoolean = values.every(value => /^(true|false)$/i.test(value));
-            const isNumeric = values.every(value => Number.isFinite(Number(value)));
-            return [{
-                key: header,
-                label: preferredLabels[header] ?? splitHeader(header),
-                type: isBoolean ? "boolean" : isNumeric ? "number" : "string"
-            }];
-        });
     }
 
     function splitHeader(header) {
@@ -426,6 +389,8 @@
             condition.operatorSelect.value = ["lt", "eq", "gt"].includes(previousOperator)
                 ? previousOperator
                 : "gt";
+        } else if (column.type === "list") {
+            condition.operatorSelect.add(new Option("Includes any of", "any"));
         } else {
             condition.operatorSelect.add(new Option("Equal to (=)", "eq"));
         }
@@ -446,7 +411,7 @@
             valueEditor = createStringValueMenu(condition, column);
         }
         valueEditor.setAttribute("aria-label", `Filter condition ${condition.conditionId} value`);
-        if (column.type !== "string") {
+        if (column.type !== "string" && column.type !== "list") {
             valueEditor.addEventListener("change", renderChart);
         }
         condition.valueInput.replaceWith(valueEditor);
@@ -456,10 +421,12 @@
     function createStringValueMenu(condition, column) {
         const valueCounts = new Map();
         rows.forEach(row => {
-            const value = (row[column.key] ?? "").trim();
-            if (value !== "") {
-                valueCounts.set(value, (valueCounts.get(value) ?? 0) + 1);
-            }
+            const rowValues = column.type === "list" ? row[column.key] : [row[column.key].trim()];
+            rowValues.forEach(value => {
+                if (value !== "") {
+                    valueCounts.set(value, (valueCounts.get(value) ?? 0) + 1);
+                }
+            });
         });
 
         const menu = document.createElement("details");
@@ -649,7 +616,7 @@
         }).then(bindChartHandlers);
 
         status.classList.remove("error");
-        status.textContent = `${points.length.toLocaleString()} materials plotted` +
+        status.textContent = `${points.length.toLocaleString()} ${points.length === 1 ? "material" : "materials"} plotted` +
             (filteredOut > 0 ? ` · ${filteredOut.toLocaleString()} filtered out` : "") +
             (skipped > 0 ? ` · ${skipped.toLocaleString()} skipped because an axis value is missing` : "");
     }
@@ -934,7 +901,7 @@
                 continue;
             }
 
-            if (column.type === "string") {
+            if (column.type === "string" || column.type === "list") {
                 if (condition.selectedValues.size > 0) {
                     activeFilters.push({
                         column: condition.columnSelect.value,
@@ -971,6 +938,9 @@
     }
 
     function matchesFilter(row, filter) {
+        if (filter.type === "list") {
+            return row[filter.column].some(value => filter.value.has(value));
+        }
         const rawRowValue = row[filter.column];
         if (rawRowValue === undefined || rawRowValue.trim() === "") {
             return false;

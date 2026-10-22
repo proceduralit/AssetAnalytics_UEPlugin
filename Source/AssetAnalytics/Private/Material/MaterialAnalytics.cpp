@@ -7,8 +7,27 @@
 #include "Core/AssetAnalyticsSettings.h"
 #include "Core/AssetAnalyticsUtilities.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/SplineMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Containers/Ticker.h"
 #include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
+#include "Engine/SkeletalMesh.h"
+#include "Engine/StaticMesh.h"
+#include "GameFramework/Actor.h"
+#include "Particles/Material/ParticleModuleMeshMaterial.h"
+#include "Particles/ParticleEmitter.h"
+#include "Particles/ParticleLODLevel.h"
+#include "Particles/ParticleModuleRequired.h"
+#include "Particles/ParticleSystem.h"
+#include "Particles/TypeData/ParticleModuleTypeDataAnimTrail.h"
+#include "Particles/TypeData/ParticleModuleTypeDataBeam2.h"
+#include "Particles/TypeData/ParticleModuleTypeDataMesh.h"
+#include "Particles/TypeData/ParticleModuleTypeDataRibbon.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
@@ -134,6 +153,9 @@ namespace Material
 
 		/** Whether each EMaterialUsage flag is enabled on the master. Empty when the master was not read. */
 		TArray<bool> UsageEnabled;
+
+		/** Loaded users found for each EMaterialUsage flag, sorted. Empty when users were not loaded. */
+		TArray<TArray<FString>> ResolvedUserPathsByUsage;
 	};
 
 	/**
@@ -246,6 +268,161 @@ namespace Material
 		return FPackageName::ExportTextPathToObjectPath(ParentExportTextPath);
 	}
 
+	/** One way a loaded user draws materials: the usage flag it needs and the materials it draws that way. */
+	struct FMaterialUse
+	{
+		/** Usage flag needed, or MATUSAGE_MAX when the component or emitter type is not recognised. */
+		EMaterialUsage Usage = MATUSAGE_MAX;
+
+		/** Materials drawn this way. Empty means the use applies to every material of the user. */
+		TArray<FSoftObjectPath> Materials;
+	};
+
+	/** Adds a use of Usage for the valid entries of Materials to Uses. */
+	static void AddMaterialUse(
+		TArray<FMaterialUse>& Uses,
+		const EMaterialUsage Usage,
+		const TArray<UMaterialInterface*>& Materials)
+	{
+		FMaterialUse& Use = Uses.AddDefaulted_GetRef();
+		Use.Usage = Usage;
+		for (const UMaterialInterface* Material : Materials)
+		{
+			if (Material != nullptr) Use.Materials.AddUnique(FSoftObjectPath(Material));
+		}
+	}
+
+	/**
+	 * Returns the usage flag a component needs for the materials it draws.
+	 * Returns: MATUSAGE_MAX for component types this report does not recognise.
+	 */
+	static EMaterialUsage GetComponentUsage(const UPrimitiveComponent& Component)
+	{
+		// Subclasses are checked before UStaticMeshComponent because they derive from it.
+		if (Component.IsA<USplineMeshComponent>()) return MATUSAGE_SplineMesh;
+		if (Component.IsA<UInstancedStaticMeshComponent>()) return MATUSAGE_InstancedStaticMeshes;
+		if (const UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(&Component))
+		{
+			const UStaticMesh* StaticMesh = StaticMeshComponent->GetStaticMesh();
+			return StaticMesh != nullptr && StaticMesh->IsNaniteEnabled() ? MATUSAGE_Nanite : MATUSAGE_StaticMesh;
+		}
+		if (Component.IsA<USkeletalMeshComponent>()) return MATUSAGE_SkeletalMesh;
+
+		// Compared by path, so the GeometryCollectionEngine module is not needed as a dependency.
+		static const FTopLevelAssetPath GeometryCollectionComponentClass(
+			TEXT("/Script/GeometryCollectionEngine"), TEXT("GeometryCollectionComponent"));
+		for (const UClass* Class = Component.GetClass(); Class != nullptr; Class = Class->GetSuperClass())
+		{
+			if (Class->GetClassPathName() == GeometryCollectionComponentClass) return MATUSAGE_GeometryCollections;
+		}
+		return MATUSAGE_MAX;
+	}
+
+	/**
+	 * Lists the materials drawn by every primitive component of a Blueprint, including inherited ones.
+	 * Input: Blueprint must be loaded. Components overridden in child Blueprints are read from their parent.
+	 * Returns: One use per component.
+	 */
+	static TArray<FMaterialUse> FindBlueprintUses(const UBlueprint& Blueprint)
+	{
+		TArray<const UActorComponent*> ComponentTemplates;
+		for (UClass* Class = Blueprint.GeneratedClass; Class != nullptr; Class = Class->GetSuperClass())
+		{
+			const UBlueprintGeneratedClass* BlueprintClass = Cast<UBlueprintGeneratedClass>(Class);
+			if (BlueprintClass == nullptr || BlueprintClass->SimpleConstructionScript == nullptr) continue;
+			for (const USCS_Node* Node : BlueprintClass->SimpleConstructionScript->GetAllNodes())
+			{
+				if (Node != nullptr && Node->ComponentTemplate != nullptr) ComponentTemplates.Add(Node->ComponentTemplate);
+			}
+		}
+
+		// Components created in native C++ constructors live on the class default object instead.
+		if (Blueprint.GeneratedClass != nullptr)
+		{
+			if (const AActor* DefaultActor = Cast<AActor>(Blueprint.GeneratedClass->GetDefaultObject()))
+			{
+				for (const UActorComponent* Component : DefaultActor->GetComponents())
+				{
+					if (Component != nullptr) ComponentTemplates.Add(Component);
+				}
+			}
+		}
+
+		TArray<FMaterialUse> Uses;
+		for (const UActorComponent* ComponentTemplate : ComponentTemplates)
+		{
+			const UPrimitiveComponent* PrimitiveComponent = Cast<UPrimitiveComponent>(ComponentTemplate);
+			if (PrimitiveComponent == nullptr) continue;
+
+			TArray<UMaterialInterface*> UsedMaterials;
+			PrimitiveComponent->GetUsedMaterials(UsedMaterials);
+			AddMaterialUse(Uses, GetComponentUsage(*PrimitiveComponent), UsedMaterials);
+		}
+		return Uses;
+	}
+
+	/**
+	 * Lists the materials drawn by each emitter of a Cascade particle system, using its highest-detail LOD.
+	 * Returns: One use per emitter, with the usage flag its emitter type needs.
+	 */
+	static TArray<FMaterialUse> FindParticleSystemUses(const UParticleSystem& ParticleSystem)
+	{
+		TArray<FMaterialUse> Uses;
+		for (const UParticleEmitter* Emitter : ParticleSystem.Emitters)
+		{
+			if (Emitter == nullptr || Emitter->LODLevels.Num() == 0 || Emitter->LODLevels[0] == nullptr) continue;
+			const UParticleLODLevel& LODLevel = *Emitter->LODLevels[0];
+
+			TArray<UMaterialInterface*> EmitterMaterials;
+			if (LODLevel.RequiredModule != nullptr) EmitterMaterials.Add(LODLevel.RequiredModule->Material);
+			for (const UParticleModule* Module : LODLevel.Modules)
+			{
+				if (const UParticleModuleMeshMaterial* MeshMaterialModule = Cast<UParticleModuleMeshMaterial>(Module))
+				{
+					EmitterMaterials.Append(MeshMaterialModule->MeshMaterials);
+				}
+			}
+
+			// Emitters without a type data module draw sprites.
+			EMaterialUsage Usage = MATUSAGE_ParticleSprites;
+			const UParticleModuleTypeDataBase* TypeData = LODLevel.TypeDataModule;
+			if (const UParticleModuleTypeDataMesh* MeshTypeData = Cast<UParticleModuleTypeDataMesh>(TypeData))
+			{
+				Usage = MATUSAGE_MeshParticles;
+				if (MeshTypeData->Mesh != nullptr)
+				{
+					for (const FStaticMaterial& StaticMaterial : MeshTypeData->Mesh->GetStaticMaterials())
+					{
+						EmitterMaterials.Add(StaticMaterial.MaterialInterface);
+					}
+				}
+			}
+			else if (TypeData != nullptr &&
+				(TypeData->IsA<UParticleModuleTypeDataBeam2>() ||
+				TypeData->IsA<UParticleModuleTypeDataRibbon>() ||
+				TypeData->IsA<UParticleModuleTypeDataAnimTrail>()))
+			{
+				Usage = MATUSAGE_BeamTrails;
+			}
+			AddMaterialUse(Uses, Usage, EmitterMaterials);
+		}
+		return Uses;
+	}
+
+	/**
+	 * Lists the skeletal mesh features that need their own usage flags. They apply to every material of the
+	 * mesh, because the report does not check which sections have morph targets or cloth.
+	 * Returns: One use per feature found.
+	 */
+	static TArray<FMaterialUse> FindSkeletalMeshUses(USkeletalMesh& SkeletalMesh)
+	{
+		TArray<FMaterialUse> Uses;
+		if (SkeletalMesh.GetMorphTargets().Num() > 0) Uses.Add({ MATUSAGE_MorphTargets, {} });
+		if (SkeletalMesh.HasActiveClothingAssets()) Uses.Add({ MATUSAGE_Clothing, {} });
+		if (SkeletalMesh.GetDefaultMeshDeformer() != nullptr) Uses.Add({ MATUSAGE_MeshDeformer, {} });
+		return Uses;
+	}
+
 	/** Returns whether PackageName is inside the project's Developers folder. */
 	static bool IsDeveloperPackage(const FName PackageName)
 	{
@@ -352,6 +529,7 @@ namespace Material
 			ChildInstancesByParent.Reset();
 			InstancePackages.Reset();
 			UserByPackage.Reset();
+			UsesByUserPath.Reset();
 			NextAssetIndex = 0;
 		}
 
@@ -560,6 +738,88 @@ namespace Material
 		}
 
 		/**
+		 * Returns the material uses of the user at UserPath, loading it the first time it is needed in this run.
+		 * Output: Increases LoadedAssetCount when this call loaded the user from disk.
+		 */
+		const TArray<FMaterialUse>& GetUserUses(const FString& UserPath, int32& LoadedAssetCount)
+		{
+			if (const TArray<FMaterialUse>* CachedUses = UsesByUserPath.Find(UserPath)) return *CachedUses;
+
+			const FSoftObjectPath UserObjectPath(UserPath);
+			UObject* User = UserObjectPath.ResolveObject();
+			if (User == nullptr)
+			{
+				User = UserObjectPath.TryLoad();
+				if (User != nullptr) ++LoadedAssetCount;
+			}
+
+			TArray<FMaterialUse> Uses;
+			if (const UBlueprint* Blueprint = Cast<UBlueprint>(User)) Uses = FindBlueprintUses(*Blueprint);
+			else if (const UParticleSystem* ParticleSystem = Cast<UParticleSystem>(User)) Uses = FindParticleSystemUses(*ParticleSystem);
+			else if (USkeletalMesh* SkeletalMesh = Cast<USkeletalMesh>(User)) Uses = FindSkeletalMeshUses(*SkeletalMesh);
+			else UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material user %s."), *UserPath);
+			return UsesByUserPath.Add(UserPath, MoveTemp(Uses));
+		}
+
+		/**
+		 * Loads the Blueprint, Cascade particle system and skeletal mesh users of a material and files each one
+		 * under the usage flags it needs. Blueprints and particle systems whose uses of this material are all
+		 * recognised are removed from their broad group; skeletal meshes stay under SkeletalMesh.
+		 * Input: MaterialAndInstances is the master and its counted instances.
+		 * Returns: The number of users loaded from disk.
+		 */
+		int32 ResolveUsersByLoading(FMaterialAssetData& Item, const TArray<FAssetData>& MaterialAndInstances)
+		{
+			TSet<FSoftObjectPath> TreeMaterials;
+			for (const FAssetData& MaterialOrInstance : MaterialAndInstances)
+			{
+				TreeMaterials.Add(MaterialOrInstance.GetSoftObjectPath());
+			}
+
+			int32 LoadedAssetCount = 0;
+			Item.ResolvedUserPathsByUsage.SetNum(MATUSAGE_MAX);
+			const EMaterialUserType ResolvableTypes[] =
+			{
+				EMaterialUserType::Blueprint,
+				EMaterialUserType::Particle,
+				EMaterialUserType::SkeletalMesh
+			};
+			for (const EMaterialUserType UserType : ResolvableTypes)
+			{
+				TArray<FString>& UserPaths = Item.UserPathsByType[static_cast<int32>(UserType)];
+				for (int32 UserIndex = UserPaths.Num() - 1; UserIndex >= 0; --UserIndex)
+				{
+					const FString UserPath = UserPaths[UserIndex];
+					TSet<EMaterialUsage> NeededUsages;
+					bool bHasUnrecognisedUse = false;
+					for (const FMaterialUse& Use : GetUserUses(UserPath, LoadedAssetCount))
+					{
+						const bool bUsesThisMaterial = Use.Materials.Num() == 0 ||
+							Use.Materials.ContainsByPredicate([&TreeMaterials](const FSoftObjectPath& Material)
+							{
+								return TreeMaterials.Contains(Material);
+							});
+						if (!bUsesThisMaterial) continue;
+						if (Use.Usage == MATUSAGE_MAX) bHasUnrecognisedUse = true;
+						else NeededUsages.Add(Use.Usage);
+					}
+
+					for (const EMaterialUsage Usage : NeededUsages)
+					{
+						Item.ResolvedUserPathsByUsage[Usage].AddUnique(UserPath);
+					}
+					const bool bFullyResolved = NeededUsages.Num() > 0 && !bHasUnrecognisedUse;
+					if (UserType != EMaterialUserType::SkeletalMesh && bFullyResolved) UserPaths.RemoveAt(UserIndex);
+				}
+			}
+			for (TArray<FString>& ResolvedUserPaths : Item.ResolvedUserPathsByUsage)
+			{
+				ResolvedUserPaths.Sort();
+			}
+			return LoadedAssetCount;
+		}
+
+		/**
 		 * Fills report rows for the next batch of master materials, loading them only when usage flags are enabled.
 		 * Returns: True while more assets are waiting.
 		 */
@@ -573,9 +833,13 @@ namespace Material
 
 			// Snapshot loaded packages so everything this batch loads, including dependencies, can be unloaded afterwards.
 			const double BatchStartSeconds = FPlatformTime::Seconds();
+			const bool bResolveUsersByLoading = Settings->bMaterialUserTypeCounts && Settings->bMaterialResolveUsersByLoading;
 			TSet<UPackage*> PackagesBeforeBatch;
-			if (Settings->bMaterialUsageFlags) PackagesBeforeBatch = Core::FReportPackageUnloader::GetLoadedPackages();
-			int32 LoadedMaterialCount = 0;
+			if (Settings->bMaterialUsageFlags || bResolveUsersByLoading)
+			{
+				PackagesBeforeBatch = Core::FReportPackageUnloader::GetLoadedPackages();
+			}
+			int32 LoadedAssetCount = 0;
 
 			for (; NextAssetIndex < BatchEnd; ++NextAssetIndex)
 			{
@@ -601,19 +865,20 @@ namespace Material
 						TArray<FAssetData> MaterialAndInstances = Item.Instances;
 						MaterialAndInstances.Add(AssetData);
 						GatherUsersByType(AssetRegistry, MaterialAndInstances, *Settings, Item);
+						if (bResolveUsersByLoading) LoadedAssetCount += ResolveUsersByLoading(Item, MaterialAndInstances);
 					}
 				}
-				if (Settings->bMaterialUsageFlags && ReadUsageFlags(AssetData, Item)) ++LoadedMaterialCount;
+				if (Settings->bMaterialUsageFlags && ReadUsageFlags(AssetData, Item)) ++LoadedAssetCount;
 			}
-			if (LoadedMaterialCount > 0)
+			if (LoadedAssetCount > 0)
 			{
 				PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
 				PackageUnloader.UnloadReportPackages();
 				UE_LOG(
 					LogTemp,
 					Log,
-					TEXT("Material Analytics loaded and unloaded %d master materials in %.2f s."),
-					LoadedMaterialCount,
+					TEXT("Material Analytics loaded and unloaded %d assets (master materials and users) in %.2f s."),
+					LoadedAssetCount,
 					FPlatformTime::Seconds() - BatchStartSeconds);
 			}
 			UpdateProgressNotification();
@@ -723,20 +988,30 @@ namespace Material
 		{
 			const bool bHasUsageFlag = Entry.Usage != MATUSAGE_MAX && Item.UsageEnabled.Num() > 0;
 			const bool bEnabled = bHasUsageFlag && Item.UsageEnabled[Entry.Usage];
-			const bool bUsersKnown =
+			const bool bRegistryUsersKnown =
 				Entry.RegistryUserType != EMaterialUserType::Count && Item.UserPathsByType.Num() > 0;
-			const TArray<FString>* UserPaths = bUsersKnown
-				? &Item.UserPathsByType[static_cast<int32>(Entry.RegistryUserType)]
-				: nullptr;
-			const bool bHasUsers = UserPaths != nullptr && UserPaths->Num() > 0;
-			if (!bHasUsers && !bEnabled) return;
+
+			// Users found by loading are added to the registry users. They only make Users known for entries the
+			// registry cannot fill when at least one was found, because levels and placements were not checked.
+			TArray<FString> UserPaths;
+			if (bRegistryUsersKnown) UserPaths = Item.UserPathsByType[static_cast<int32>(Entry.RegistryUserType)];
+			if (Entry.Usage != MATUSAGE_MAX && Item.ResolvedUserPathsByUsage.Num() > 0)
+			{
+				for (const FString& ResolvedUserPath : Item.ResolvedUserPathsByUsage[Entry.Usage])
+				{
+					UserPaths.AddUnique(ResolvedUserPath);
+				}
+				UserPaths.Sort();
+			}
+			const bool bUsersKnown = bRegistryUsersKnown || UserPaths.Num() > 0;
+			if (UserPaths.Num() == 0 && !bEnabled) return;
 
 			Writer.WriteObjectStart(Entry.Name);
 			if (bHasUsageFlag) Writer.WriteValue(TEXT("Enabled"), bEnabled);
-			if (UserPaths != nullptr)
+			if (bUsersKnown)
 			{
 				Writer.WriteArrayStart(TEXT("Users"));
-				for (const FString& UserPath : *UserPaths)
+				for (const FString& UserPath : UserPaths)
 				{
 					Writer.WriteValue(UserPath);
 				}
@@ -773,6 +1048,8 @@ namespace Material
 		TSet<FName> InstancePackages;
 		/** Type and report path of each referencing package classified so far in this run. */
 		TMap<FName, FMaterialUser> UserByPackage;
+		/** Material uses of each user loaded so far in this run, so every user is loaded only once. */
+		TMap<FString, TArray<FMaterialUse>> UsesByUserPath;
 		/** Unloads the master materials loaded to read usage flags, after each batch. */
 		Core::FReportPackageUnloader PackageUnloader;
 		FTSTicker::FDelegateHandle TickerHandle;

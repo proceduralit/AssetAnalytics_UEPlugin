@@ -131,4 +131,12 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Usage Flags (Needs Asset Loading)"))
 	bool bMaterialUsageFlags = false;
+
+	/**
+	 * Loads Blueprint, Cascade particle system and skeletal mesh users to find the exact usage they need
+	 * (spline mesh, instanced static mesh, particle sprites, morph targets, cloth, ...). Niagara systems,
+	 * level actors and static mesh placements are not resolved. Users are unloaded again after each batch.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Vertex Factory Users (Needs Asset Loading)"))
+	bool bMaterialResolveUsersByLoading = false;
 };
