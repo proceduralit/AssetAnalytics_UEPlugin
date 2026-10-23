@@ -15,6 +15,7 @@
 #include "Engine/Texture2D.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -342,15 +343,18 @@ namespace Mesh
 		void Start()
 		{
 			if (TickerHandle.IsValid()) return;
+			ResetReportData();
+			PackageUnloader.Reset();
 			ProgressNotification.Show(
-				LOCTEXT("FindingMeshAssets", "Finding mesh assets..."),
+				LOCTEXT("PreparingMeshAnalytics", "Preparing Mesh Analytics..."),
 				LOCTEXT("CancelMeshAnalyticsTooltip", "Stop gathering mesh analytics."),
 				FSimpleDelegate::CreateRaw(this, &FMeshAnalyticsRunner::Cancel));
 
-			// The folder scan blocks the editor, so give Slate time to draw the notification first.
+			// Work is split into small steps run on separate ticks, so the editor repaints the notification in between.
+			Step = ERunnerStep::ShowNotification;
+			StepStartSeconds = FPlatformTime::Seconds();
 			TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
-				FTickerDelegate::CreateRaw(this, &FMeshAnalyticsRunner::FindAssetsAndStartProcessing),
-				NotificationDisplayDelaySeconds);
+				FTickerDelegate::CreateRaw(this, &FMeshAnalyticsRunner::Tick));
 		}
 
 		/** Stops gathering and throws away unfinished results. */
@@ -361,25 +365,56 @@ namespace Mesh
 				FTSTicker::RemoveTicker(TickerHandle);
 				TickerHandle.Reset();
 			}
-			PendingAssets.Reset();
-			AssetItems.Reset();
-			NextAssetIndex = 0;
+			TrackUnfinishedBatch();
+			ResetReportData();
 			PackageUnloader.UnloadReportPackages();
 			ProgressNotification.Dismiss();
 		}
 
 	private:
-		/** Updates the notification with the current asset count. */
+		/** Stages of a report run. Each Tick performs one stage, or part of ProcessMeshes. */
+		enum class ERunnerStep : uint8
+		{
+			/** Waits briefly so the notification is visible before any blocking work. */
+			ShowNotification,
+			/** Scans the search folders and lists the mesh assets. */
+			FindMeshes,
+			/** Fills report rows within a per-tick time budget. */
+			ProcessMeshes,
+			/** Unloads the packages loaded by the finished batch. */
+			UnloadPackages
+		};
+
+		/** Updates the notification with the current asset count and the last asset processed. */
 		void UpdateProgressNotification() const
 		{
 			const int32 ProgressPercent = PendingAssets.Num() > 0
 				? FMath::RoundToInt(static_cast<float>(NextAssetIndex) / PendingAssets.Num() * 100.0f)
 				: 100;
 			ProgressNotification.SetText(FText::Format(
-				LOCTEXT("MeshAnalyticsProgress", "Gathering Mesh Analytics - {0} / {1} assets ({2}%)"),
+				LOCTEXT("MeshAnalyticsProgress", "Gathering Mesh Analytics - {0} / {1} ({2}%)\n{3}"),
 				FText::AsNumber(NextAssetIndex),
 				FText::AsNumber(PendingAssets.Num()),
-				FText::AsNumber(ProgressPercent)));
+				FText::AsNumber(ProgressPercent),
+				FText::FromString(CurrentAssetName)));
+		}
+
+		/** Clears pending assets, finished rows and the batch state. */
+		void ResetReportData()
+		{
+			PendingAssets.Reset();
+			AssetItems.Reset();
+			NextAssetIndex = 0;
+			AssetsInBatch = 0;
+			bBatchLoadedAnyAsset = false;
+			PackagesBeforeBatch.Reset();
+			CurrentAssetName.Reset();
+		}
+
+		/** Adds the packages loaded by a batch that was interrupted to the unloader, so they are not left loaded. */
+		void TrackUnfinishedBatch()
+		{
+			if (AssetsInBatch > 0 && bBatchLoadedAnyAsset) PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
 		}
 
 		/** Cancels gathering, clears unfinished results, and updates the notification. */
@@ -390,23 +425,17 @@ namespace Mesh
 				FTSTicker::RemoveTicker(TickerHandle);
 				TickerHandle.Reset();
 			}
-			PendingAssets.Reset();
-			AssetItems.Reset();
-			NextAssetIndex = 0;
+			TrackUnfinishedBatch();
+			ResetReportData();
 			PackageUnloader.UnloadReportPackages();
 			ProgressNotification.Finish(
 				LOCTEXT("MeshAnalyticsCancelled", "Mesh Analytics gathering cancelled."),
 				SNotificationItem::CS_None);
 		}
 
-		/** Finds the mesh assets in the configured folders. */
-		void BeginGatheringAssets()
+		/** Scans the configured folders and lists their mesh assets in PendingAssets. */
+		void FindMeshAssets(IAssetRegistry& AssetRegistry)
 		{
-			PendingAssets.Reset();
-			AssetItems.Reset();
-			NextAssetIndex = 0;
-			PackageUnloader.Reset();
-
 			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
 			FARFilter Filter;
 			if (Settings->bStaticMeshes) Filter.ClassPaths.Add(UStaticMesh::StaticClass()->GetClassPathName());
@@ -430,9 +459,6 @@ namespace Mesh
 			}
 			if (Filter.ClassPaths.Num() == 0 || Filter.PackagePaths.Num() == 0) return;
 
-			FAssetRegistryModule& AssetRegistryModule =
-				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-			IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 			TArray<FString> PathsToScan;
 			for (const FName PackagePath : Filter.PackagePaths)
 			{
@@ -443,27 +469,83 @@ namespace Mesh
 		}
 
 		/**
-		 * Finds the mesh assets, then hands over to Tick for batch processing.
-		 * Returns: False, so this one-shot ticker is removed.
+		 * Fills the report row of one mesh asset, loading it only for columns that require it.
+		 * Returns: True when this call loaded the asset from disk.
 		 */
-		bool FindAssetsAndStartProcessing(float)
+		bool ProcessMeshAsset(IAssetRegistry& AssetRegistry, const UAssetAnalyticsSettings& Settings, const FAssetData& AssetData)
 		{
-			TickerHandle.Reset();
-			BeginGatheringAssets();
-			UpdateProgressNotification();
-			if (PendingAssets.Num() == 0)
+			if (Settings.bIgnoreUnreferencedAssets &&
+				!Core::HasRelevantReferencer(AssetRegistry, AssetData, Settings.bIgnoreDeveloperReferences)) return false;
+
+			UObject* MeshAsset = nullptr;
+			bool bWasAssetLoaded = true;
+			if (NeedsAssetLoading(AssetData, Settings))
 			{
-				CompleteReport();
-				return false;
+				bWasAssetLoaded = AssetData.IsAssetLoaded();
+				MeshAsset = AssetData.GetAsset();
 			}
-			TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
-				FTickerDelegate::CreateRaw(this, &FMeshAnalyticsRunner::Tick));
-			return false;
+			AssetItems.Add(MakeMeshAssetData(AssetRegistry, AssetData, MeshAsset, Settings));
+			return !bWasAssetLoaded && MeshAsset != nullptr;
 		}
 
 		/**
-		 * Processes the next batch and loads assets only for columns that require it.
-		 * Returns: True while more assets are waiting.
+		 * Processes mesh assets until the tick time budget is used, so the editor keeps repainting.
+		 * AssetsPerTick assets make one batch; when a batch has loaded assets, the next tick unloads them.
+		 * Returns: True while the report is still running.
+		 */
+		bool ProcessMeshesForOneTick(IAssetRegistry& AssetRegistry, const UAssetAnalyticsSettings& Settings)
+		{
+			const double TickStartSeconds = FPlatformTime::Seconds();
+			const int32 AssetsPerBatch = FMath::Max(Settings.AssetsPerTick, 1);
+			while (NextAssetIndex < PendingAssets.Num())
+			{
+				// Snapshot loaded packages so everything this batch loads, including dependencies, can be unloaded afterwards.
+				if (AssetsInBatch == 0)
+				{
+					PackagesBeforeBatch = Core::FReportPackageUnloader::GetLoadedPackages();
+					bBatchLoadedAnyAsset = false;
+				}
+
+				const FAssetData& AssetData = PendingAssets[NextAssetIndex];
+				CurrentAssetName = AssetData.AssetName.ToString();
+				if (ProcessMeshAsset(AssetRegistry, Settings, AssetData)) bBatchLoadedAnyAsset = true;
+				++NextAssetIndex;
+				++AssetsInBatch;
+
+				const bool bBatchFinished = AssetsInBatch >= AssetsPerBatch || NextAssetIndex >= PendingAssets.Num();
+				if (bBatchFinished)
+				{
+					if (bBatchLoadedAnyAsset)
+					{
+						// Unloading can take a while, so it gets its own tick and message.
+						PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
+						Step = ERunnerStep::UnloadPackages;
+						ProgressNotification.SetText(FText::Format(
+							LOCTEXT("UnloadingMeshPackages", "Mesh Analytics - {0} / {1}\nUnloading {2} packages..."),
+							FText::AsNumber(NextAssetIndex),
+							FText::AsNumber(PendingAssets.Num()),
+							FText::AsNumber(PackageUnloader.GetTrackedPackageCount())));
+						return true;
+					}
+					AssetsInBatch = 0;
+				}
+				if (FPlatformTime::Seconds() - TickStartSeconds >= TickTimeBudgetSeconds) break;
+			}
+
+			if (NextAssetIndex >= PendingAssets.Num())
+			{
+				TickerHandle.Reset();
+				CompleteReport();
+				return false;
+			}
+			UpdateProgressNotification();
+			return true;
+		}
+
+		/**
+		 * Runs the current stage of the report and moves to the next one. Stages that block the editor run on their
+		 * own tick after their message is shown, so the notification always says what is happening.
+		 * Returns: True while the report is still running.
 		 */
 		bool Tick(float)
 		{
@@ -471,34 +553,44 @@ namespace Mesh
 				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 			IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
-			const int32 BatchEnd = FMath::Min(NextAssetIndex + FMath::Max(Settings->AssetsPerTick, 1), PendingAssets.Num());
-			const TSet<UPackage*> PackagesBeforeBatch = Core::FReportPackageUnloader::GetLoadedPackages();
-			bool bLoadedAnyAsset = false;
 
-			for (; NextAssetIndex < BatchEnd; ++NextAssetIndex)
+			switch (Step)
 			{
-				const FAssetData& AssetData = PendingAssets[NextAssetIndex];
-				if (Settings->bIgnoreUnreferencedAssets &&
-					!Core::HasRelevantReferencer(AssetRegistry, AssetData, Settings->bIgnoreDeveloperReferences)) continue;
-				UObject* MeshAsset = nullptr;
-				bool bWasAssetLoaded = true;
-				if (NeedsAssetLoading(AssetData, *Settings))
+			case ERunnerStep::ShowNotification:
+				// The notification fades in over a few frames; blocking work before that would hide it.
+				if (FPlatformTime::Seconds() - StepStartSeconds < NotificationDisplayDelaySeconds) return true;
+				Step = ERunnerStep::FindMeshes;
+				ProgressNotification.SetText(LOCTEXT("ScanningMeshFolders", "Mesh Analytics\nScanning mesh folders..."));
+				return true;
+
+			case ERunnerStep::FindMeshes:
+				FindMeshAssets(AssetRegistry);
+				if (PendingAssets.Num() == 0)
 				{
-					bWasAssetLoaded = AssetData.IsAssetLoaded();
-					MeshAsset = AssetData.GetAsset();
+					TickerHandle.Reset();
+					CompleteReport();
+					return false;
 				}
-				AssetItems.Add(MakeMeshAssetData(AssetRegistry, AssetData, MeshAsset, *Settings));
-				if (!bWasAssetLoaded && MeshAsset != nullptr) bLoadedAnyAsset = true;
-			}
-			if (bLoadedAnyAsset) PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
-			PackageUnloader.UnloadReportPackages();
-			UpdateProgressNotification();
+				Step = ERunnerStep::ProcessMeshes;
+				UpdateProgressNotification();
+				return true;
 
-			if (NextAssetIndex >= PendingAssets.Num())
-			{
-				TickerHandle.Reset();
-				CompleteReport();
-				return false;
+			case ERunnerStep::ProcessMeshes:
+				return ProcessMeshesForOneTick(AssetRegistry, *Settings);
+
+			case ERunnerStep::UnloadPackages:
+				PackageUnloader.UnloadReportPackages();
+				AssetsInBatch = 0;
+				bBatchLoadedAnyAsset = false;
+				if (NextAssetIndex >= PendingAssets.Num())
+				{
+					TickerHandle.Reset();
+					CompleteReport();
+					return false;
+				}
+				Step = ERunnerStep::ProcessMeshes;
+				UpdateProgressNotification();
+				return true;
 			}
 			return true;
 		}
@@ -613,7 +705,9 @@ namespace Mesh
 			return CsvData;
 		}
 
-		static constexpr float NotificationDisplayDelaySeconds = 0.2f;
+		static constexpr double NotificationDisplayDelaySeconds = 0.2;
+		/** Longest time one tick spends processing assets before letting the editor repaint. */
+		static constexpr double TickTimeBudgetSeconds = 0.05;
 		TArray<FMeshAssetData> AssetItems;
 		TArray<FAssetData> PendingAssets;
 		Core::FReportPackageUnloader PackageUnloader;
@@ -621,6 +715,18 @@ namespace Mesh
 		/** Notification that shows the report progress and the Cancel button. */
 		Core::FReportProgressNotification ProgressNotification;
 		int32 NextAssetIndex = 0;
+		/** Stage the next Tick runs. */
+		ERunnerStep Step = ERunnerStep::ShowNotification;
+		/** When the report started, used to delay blocking work until the notification is visible. */
+		double StepStartSeconds = 0.0;
+		/** Assets processed in the current batch. */
+		int32 AssetsInBatch = 0;
+		/** Whether the current batch loaded any asset from disk. */
+		bool bBatchLoadedAnyAsset = false;
+		/** Packages that were loaded before the current batch started. */
+		TSet<UPackage*> PackagesBeforeBatch;
+		/** Name of the last asset processed, shown in the notification. */
+		FString CurrentAssetName;
 	};
 
 	static TUniquePtr<FMeshAnalyticsRunner> MeshAnalyticsRunner;
