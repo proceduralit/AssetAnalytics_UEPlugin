@@ -4,6 +4,7 @@
 #include "Mesh/MeshAnalytics.h"
 #include "Core/AssetAnalyticsSettings.h"
 #include "Core/AssetAnalyticsPackageUnloader.h"
+#include "Core/AssetAnalyticsProgressNotification.h"
 #include "Core/AssetAnalyticsReportBridge.h"
 #include "Core/AssetAnalyticsUtilities.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -12,7 +13,6 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture.h"
 #include "Engine/Texture2D.h"
-#include "Framework/Notifications/NotificationManager.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "Materials/MaterialInterface.h"
@@ -24,7 +24,6 @@
 #include "Rendering/SkeletalMeshRenderData.h"
 #include "ProfilingDebugging/ResourceSize.h"
 #include "UObject/Package.h"
-#include "Widgets/Notifications/SNotificationList.h"
 
 #define LOCTEXT_NAMESPACE "MeshAnalytics"
 
@@ -343,7 +342,10 @@ namespace Mesh
 		void Start()
 		{
 			if (TickerHandle.IsValid()) return;
-			ShowProgressNotification();
+			ProgressNotification.Show(
+				LOCTEXT("FindingMeshAssets", "Finding mesh assets..."),
+				LOCTEXT("CancelMeshAnalyticsTooltip", "Stop gathering mesh analytics."),
+				FSimpleDelegate::CreateRaw(this, &FMeshAnalyticsRunner::Cancel));
 
 			// The folder scan blocks the editor, so give Slate time to draw the notification first.
 			TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
@@ -363,69 +365,21 @@ namespace Mesh
 			AssetItems.Reset();
 			NextAssetIndex = 0;
 			PackageUnloader.UnloadReportPackages();
-			DismissProgressNotification();
+			ProgressNotification.Dismiss();
 		}
 
 	private:
-		/** Shows the progress notification used while assets are gathered. */
-		void ShowProgressNotification()
-		{
-			FNotificationInfo NotificationInfo(LOCTEXT("FindingMeshAssets", "Finding mesh assets..."));
-			NotificationInfo.ButtonDetails.Add(FNotificationButtonInfo(
-				LOCTEXT("CancelMeshAnalytics", "Cancel"),
-				LOCTEXT("CancelMeshAnalyticsTooltip", "Stop gathering mesh analytics."),
-				FSimpleDelegate::CreateRaw(this, &FMeshAnalyticsRunner::Cancel)));
-			NotificationInfo.WidthOverride = 320.0f;
-			NotificationInfo.bFireAndForget = false;
-			NotificationInfo.FadeInDuration = 0.1f;
-			NotificationInfo.FadeOutDuration = 0.5f;
-			NotificationInfo.ExpireDuration = 3.0f;
-			NotificationInfo.bUseLargeFont = false;
-			NotificationInfo.bUseThrobber = false;
-			NotificationInfo.bUseSuccessFailIcons = false;
-			ProgressNotificationItem = FSlateNotificationManager::Get().AddNotification(NotificationInfo);
-			if (ProgressNotificationItem.IsValid()) ProgressNotificationItem->SetCompletionState(SNotificationItem::CS_Pending);
-		}
-
 		/** Updates the notification with the current asset count. */
 		void UpdateProgressNotification() const
 		{
-			if (ProgressNotificationItem.IsValid())
-			{
-				const int32 ProgressPercent = PendingAssets.Num() > 0
-					? FMath::RoundToInt(static_cast<float>(NextAssetIndex) / PendingAssets.Num() * 100.0f)
-					: 100;
-				ProgressNotificationItem->SetText(FText::Format(
-					LOCTEXT("MeshAnalyticsProgress", "Gathering Mesh Analytics - {0} / {1} assets ({2}%)"),
-					FText::AsNumber(NextAssetIndex),
-					FText::AsNumber(PendingAssets.Num()),
-					FText::AsNumber(ProgressPercent)));
-			}
-		}
-
-		/** Shows ResultText and State, then closes the progress notification. */
-		void FinishProgressNotification(
-			const FText& ResultText,
-			const SNotificationItem::ECompletionState State)
-		{
-			if (ProgressNotificationItem.IsValid())
-			{
-				ProgressNotificationItem->SetText(ResultText);
-				ProgressNotificationItem->SetCompletionState(State);
-				ProgressNotificationItem->ExpireAndFadeout();
-			}
-			ProgressNotificationItem.Reset();
-		}
-
-		/** Hides the progress notification during shutdown. */
-		void DismissProgressNotification()
-		{
-			if (ProgressNotificationItem.IsValid())
-			{
-				ProgressNotificationItem->SetCompletionState(SNotificationItem::CS_None);
-				ProgressNotificationItem->Fadeout();
-			}
-			ProgressNotificationItem.Reset();
+			const int32 ProgressPercent = PendingAssets.Num() > 0
+				? FMath::RoundToInt(static_cast<float>(NextAssetIndex) / PendingAssets.Num() * 100.0f)
+				: 100;
+			ProgressNotification.SetText(FText::Format(
+				LOCTEXT("MeshAnalyticsProgress", "Gathering Mesh Analytics - {0} / {1} assets ({2}%)"),
+				FText::AsNumber(NextAssetIndex),
+				FText::AsNumber(PendingAssets.Num()),
+				FText::AsNumber(ProgressPercent)));
 		}
 
 		/** Cancels gathering, clears unfinished results, and updates the notification. */
@@ -440,7 +394,7 @@ namespace Mesh
 			AssetItems.Reset();
 			NextAssetIndex = 0;
 			PackageUnloader.UnloadReportPackages();
-			FinishProgressNotification(
+			ProgressNotification.Finish(
 				LOCTEXT("MeshAnalyticsCancelled", "Mesh Analytics gathering cancelled."),
 				SNotificationItem::CS_None);
 		}
@@ -570,7 +524,7 @@ namespace Mesh
 				*CsvPath,
 				FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 			{
-				FinishProgressNotification(
+				ProgressNotification.Finish(
 					LOCTEXT("AutomaticExportFailed", "The mesh analytics CSV file could not be saved."),
 					SNotificationItem::CS_Fail);
 				return;
@@ -578,7 +532,7 @@ namespace Mesh
 
 			const FString ReportUrl = Core::GetAssetAnalyticsReportUrl();
 			FPlatformProcess::LaunchURL(*ReportUrl, nullptr, nullptr);
-			FinishProgressNotification(
+			ProgressNotification.Finish(
 				FText::Format(
 					LOCTEXT("MeshAnalyticsComplete", "Mesh Analytics report generated for {0} assets."),
 					FText::AsNumber(AssetItems.Num())),
@@ -664,7 +618,8 @@ namespace Mesh
 		TArray<FAssetData> PendingAssets;
 		Core::FReportPackageUnloader PackageUnloader;
 		FTSTicker::FDelegateHandle TickerHandle;
-		TSharedPtr<SNotificationItem> ProgressNotificationItem;
+		/** Notification that shows the report progress and the Cancel button. */
+		Core::FReportProgressNotification ProgressNotification;
 		int32 NextAssetIndex = 0;
 	};
 

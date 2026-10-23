@@ -30,6 +30,9 @@ namespace Core
 		/** Forgets tracked packages without unloading them. */
 		void Reset();
 
+		/** Returns how many packages are waiting to be unloaded. */
+		int32 GetTrackedPackageCount() const { return PackagesLoadedForReport.Num(); }
+
 	private:
 		/** Packages loaded by the report that have not been unloaded yet. */
 		TArray<UPackage*> PackagesLoadedForReport;

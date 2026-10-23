@@ -3,6 +3,7 @@
 
 #include "Material/MaterialAnalytics.h"
 #include "Core/AssetAnalyticsPackageUnloader.h"
+#include "Core/AssetAnalyticsProgressNotification.h"
 #include "Core/AssetAnalyticsReportBridge.h"
 #include "Core/AssetAnalyticsSettings.h"
 #include "Core/AssetAnalyticsUtilities.h"
@@ -28,7 +29,6 @@
 #include "Particles/TypeData/ParticleModuleTypeDataBeam2.h"
 #include "Particles/TypeData/ParticleModuleTypeDataMesh.h"
 #include "Particles/TypeData/ParticleModuleTypeDataRibbon.h"
-#include "Framework/Notifications/NotificationManager.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
@@ -41,7 +41,6 @@
 #include "Policies/PrettyJsonPrintPolicy.h"
 #include "Serialization/JsonWriter.h"
 #include "UObject/SoftObjectPath.h"
-#include "Widgets/Notifications/SNotificationList.h"
 
 #define LOCTEXT_NAMESPACE "MaterialAnalytics"
 
@@ -438,12 +437,18 @@ namespace Material
 		void Start()
 		{
 			if (TickerHandle.IsValid()) return;
-			ShowProgressNotification();
+			ResetReportData();
+			PackageUnloader.Reset();
+			ProgressNotification.Show(
+				LOCTEXT("PreparingMaterialAnalytics", "Preparing Material Analytics..."),
+				LOCTEXT("CancelMaterialAnalyticsTooltip", "Stop gathering material analytics."),
+				FSimpleDelegate::CreateRaw(this, &FMaterialAnalyticsRunner::Cancel));
 
-			// The folder scan blocks the editor, so give Slate time to draw the notification first.
+			// Work is split into small steps run on separate ticks, so the editor repaints the notification in between.
+			Step = ERunnerStep::ShowNotification;
+			StepStartSeconds = FPlatformTime::Seconds();
 			TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
-				FTickerDelegate::CreateRaw(this, &FMaterialAnalyticsRunner::FindAssetsAndStartProcessing),
-				NotificationDisplayDelaySeconds);
+				FTickerDelegate::CreateRaw(this, &FMaterialAnalyticsRunner::Tick));
 		}
 
 		/** Stops gathering and throws away unfinished results. */
@@ -454,71 +459,42 @@ namespace Material
 				FTSTicker::RemoveTicker(TickerHandle);
 				TickerHandle.Reset();
 			}
+			TrackUnfinishedBatch();
 			ResetReportData();
 			PackageUnloader.UnloadReportPackages();
-			DismissProgressNotification();
+			ProgressNotification.Dismiss();
 		}
 
 	private:
-		/** Shows the progress notification used while assets are gathered. */
-		void ShowProgressNotification()
+		/** Stages of a report run. Each Tick performs one stage, or part of ProcessMaterials. */
+		enum class ERunnerStep : uint8
 		{
-			FNotificationInfo NotificationInfo(LOCTEXT("FindingMaterialAssets", "Finding master materials..."));
-			NotificationInfo.ButtonDetails.Add(FNotificationButtonInfo(
-				LOCTEXT("CancelMaterialAnalytics", "Cancel"),
-				LOCTEXT("CancelMaterialAnalyticsTooltip", "Stop gathering material analytics."),
-				FSimpleDelegate::CreateRaw(this, &FMaterialAnalyticsRunner::Cancel)));
-			NotificationInfo.WidthOverride = 320.0f;
-			NotificationInfo.bFireAndForget = false;
-			NotificationInfo.FadeInDuration = 0.1f;
-			NotificationInfo.FadeOutDuration = 0.5f;
-			NotificationInfo.ExpireDuration = 3.0f;
-			NotificationInfo.bUseLargeFont = false;
-			NotificationInfo.bUseThrobber = false;
-			NotificationInfo.bUseSuccessFailIcons = false;
-			ProgressNotificationItem = FSlateNotificationManager::Get().AddNotification(NotificationInfo);
-			if (ProgressNotificationItem.IsValid()) ProgressNotificationItem->SetCompletionState(SNotificationItem::CS_Pending);
-		}
+			/** Waits briefly so the notification is visible before any blocking work. */
+			ShowNotification,
+			/** Waits without blocking until the Asset Registry has finished its startup scan. */
+			WaitForAssetRegistry,
+			/** Scans the search folders and lists the master materials. */
+			FindMaterials,
+			/** Maps every material instance to its parent. */
+			BuildInstanceTree,
+			/** Fills report rows within a per-tick time budget. */
+			ProcessMaterials,
+			/** Unloads the packages loaded by the finished batch. */
+			UnloadPackages
+		};
 
-		/** Updates the notification with the current asset count. */
+		/** Updates the notification with the current material count and the last material processed. */
 		void UpdateProgressNotification() const
 		{
-			if (ProgressNotificationItem.IsValid())
-			{
-				const int32 ProgressPercent = PendingAssets.Num() > 0
-					? FMath::RoundToInt(static_cast<float>(NextAssetIndex) / PendingAssets.Num() * 100.0f)
-					: 100;
-				ProgressNotificationItem->SetText(FText::Format(
-					LOCTEXT("MaterialAnalyticsProgress", "Gathering Material Analytics - {0} / {1} assets ({2}%)"),
-					FText::AsNumber(NextAssetIndex),
-					FText::AsNumber(PendingAssets.Num()),
-					FText::AsNumber(ProgressPercent)));
-			}
-		}
-
-		/** Shows ResultText and State, then closes the progress notification. */
-		void FinishProgressNotification(
-			const FText& ResultText,
-			const SNotificationItem::ECompletionState State)
-		{
-			if (ProgressNotificationItem.IsValid())
-			{
-				ProgressNotificationItem->SetText(ResultText);
-				ProgressNotificationItem->SetCompletionState(State);
-				ProgressNotificationItem->ExpireAndFadeout();
-			}
-			ProgressNotificationItem.Reset();
-		}
-
-		/** Hides the progress notification during shutdown. */
-		void DismissProgressNotification()
-		{
-			if (ProgressNotificationItem.IsValid())
-			{
-				ProgressNotificationItem->SetCompletionState(SNotificationItem::CS_None);
-				ProgressNotificationItem->Fadeout();
-			}
-			ProgressNotificationItem.Reset();
+			const int32 ProgressPercent = PendingAssets.Num() > 0
+				? FMath::RoundToInt(static_cast<float>(NextAssetIndex) / PendingAssets.Num() * 100.0f)
+				: 100;
+			ProgressNotification.SetText(FText::Format(
+				LOCTEXT("MaterialAnalyticsProgress", "Gathering Material Analytics - {0} / {1} ({2}%)\n{3}"),
+				FText::AsNumber(NextAssetIndex),
+				FText::AsNumber(PendingAssets.Num()),
+				FText::AsNumber(ProgressPercent),
+				FText::FromString(CurrentAssetName)));
 		}
 
 		/** Clears pending assets, finished rows and the instance tree. */
@@ -531,6 +507,16 @@ namespace Material
 			UserByPackage.Reset();
 			UsesByUserPath.Reset();
 			NextAssetIndex = 0;
+			MaterialsInBatch = 0;
+			BatchLoadedAssetCount = 0;
+			PackagesBeforeBatch.Reset();
+			CurrentAssetName.Reset();
+		}
+
+		/** Adds the packages loaded by a batch that was interrupted to the unloader, so they are not left loaded. */
+		void TrackUnfinishedBatch()
+		{
+			if (MaterialsInBatch > 0 && BatchLoadedAssetCount > 0) PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
 		}
 
 		/** Cancels gathering, clears unfinished results, and updates the notification. */
@@ -541,22 +527,21 @@ namespace Material
 				FTSTicker::RemoveTicker(TickerHandle);
 				TickerHandle.Reset();
 			}
+			TrackUnfinishedBatch();
 			ResetReportData();
 			PackageUnloader.UnloadReportPackages();
-			FinishProgressNotification(
+			ProgressNotification.Finish(
 				LOCTEXT("MaterialAnalyticsCancelled", "Material Analytics gathering cancelled."),
 				SNotificationItem::CS_None);
 		}
 
 		/**
 		 * Maps every material instance in the project to its parent, without loading anything.
-		 * Instances often live outside the search folders, so the whole registry is used.
+		 * Instances often live outside the search folders, so the whole registry is used; Tick waits for the
+		 * registry's startup scan to finish before this runs.
 		 */
 		void BuildInstanceTree(IAssetRegistry& AssetRegistry)
 		{
-			// Instances outside the scanned folders are only known once the startup scan has finished.
-			AssetRegistry.WaitForCompletion();
-
 			TArray<FAssetData> MaterialInstances;
 			AssetRegistry.GetAssetsByClass(
 				UMaterialInstanceConstant::StaticClass()->GetClassPathName(),
@@ -651,12 +636,9 @@ namespace Material
 			}
 		}
 
-		/** Finds the master materials in the configured folders and builds the instance tree when needed. */
-		void BeginGatheringAssets()
+		/** Scans the configured folders and lists their master materials in PendingAssets. */
+		void FindMasterMaterials(IAssetRegistry& AssetRegistry)
 		{
-			ResetReportData();
-			PackageUnloader.Reset();
-
 			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
 			FARFilter Filter;
 			// Subclasses are left out so material instances are not reported as masters.
@@ -680,9 +662,6 @@ namespace Material
 			}
 			if (Filter.PackagePaths.Num() == 0) return;
 
-			FAssetRegistryModule& AssetRegistryModule =
-				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-			IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 			TArray<FString> PathsToScan;
 			for (const FName PackagePath : Filter.PackagePaths)
 			{
@@ -690,28 +669,19 @@ namespace Material
 			}
 			AssetRegistry.ScanPathsSynchronous(PathsToScan, true);
 			AssetRegistry.GetAssets(Filter, PendingAssets);
-
-			const bool bNeedsInstanceTree = Settings->bMaterialInstanceCounts || Settings->bMaterialUserTypeCounts;
-			if (bNeedsInstanceTree && PendingAssets.Num() > 0) BuildInstanceTree(AssetRegistry);
 		}
 
-		/**
-		 * Finds the master materials, then hands over to Tick for batch processing.
-		 * Returns: False, so this one-shot ticker is removed.
-		 */
-		bool FindAssetsAndStartProcessing(float)
+		/** Returns whether the enabled settings need the material instance tree. */
+		static bool NeedsInstanceTree(const UAssetAnalyticsSettings& Settings)
 		{
-			TickerHandle.Reset();
-			BeginGatheringAssets();
-			UpdateProgressNotification();
-			if (PendingAssets.Num() == 0)
-			{
-				CompleteReport();
-				return false;
-			}
-			TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
-				FTickerDelegate::CreateRaw(this, &FMaterialAnalyticsRunner::Tick));
-			return false;
+			return Settings.bMaterialInstanceCounts || Settings.bMaterialUserTypeCounts;
+		}
+
+		/** Returns whether the enabled settings load assets, so batches must be unloaded. */
+		static bool NeedsAssetLoading(const UAssetAnalyticsSettings& Settings)
+		{
+			return Settings.bMaterialUsageFlags ||
+				(Settings.bMaterialUserTypeCounts && Settings.bMaterialResolveUsersByLoading);
 		}
 
 		/**
@@ -820,8 +790,100 @@ namespace Material
 		}
 
 		/**
-		 * Fills report rows for the next batch of master materials, loading them only when usage flags are enabled.
-		 * Returns: True while more assets are waiting.
+		 * Fills the report row of one master material, loading it or its users when the settings ask for it.
+		 * Returns: The number of assets this call loaded from disk.
+		 */
+		int32 ProcessMaterial(IAssetRegistry& AssetRegistry, const UAssetAnalyticsSettings& Settings, const FAssetData& AssetData)
+		{
+			if (Settings.bIgnoreUnreferencedAssets &&
+				!Core::HasRelevantReferencer(AssetRegistry, AssetData, Settings.bIgnoreDeveloperReferences)) return 0;
+
+			int32 LoadedAssetCount = 0;
+			FMaterialAssetData& Item = AssetItems.Emplace_GetRef(AssetData);
+			if (Settings.bMaterialPackageDiskSize)
+			{
+				FAssetPackageData PackageData;
+				if (AssetRegistry.TryGetAssetPackageData(AssetData.PackageName, PackageData) ==
+					UE::AssetRegistry::EExists::Exists)
+				{
+					Item.PackageDiskSize = PackageData.DiskSize;
+				}
+			}
+			if (NeedsInstanceTree(Settings))
+			{
+				Item.Instances = GatherCountedInstances(AssetRegistry, AssetData.GetSoftObjectPath(), Settings);
+				if (Settings.bMaterialUserTypeCounts)
+				{
+					TArray<FAssetData> MaterialAndInstances = Item.Instances;
+					MaterialAndInstances.Add(AssetData);
+					GatherUsersByType(AssetRegistry, MaterialAndInstances, Settings, Item);
+					if (Settings.bMaterialResolveUsersByLoading) LoadedAssetCount += ResolveUsersByLoading(Item, MaterialAndInstances);
+				}
+			}
+			if (Settings.bMaterialUsageFlags && ReadUsageFlags(AssetData, Item)) ++LoadedAssetCount;
+			return LoadedAssetCount;
+		}
+
+		/**
+		 * Processes master materials until the tick time budget is used, so the editor keeps repainting.
+		 * AssetsPerTick masters make one batch; when a batch has loaded assets, the next tick unloads them.
+		 * Returns: True while the report is still running.
+		 */
+		bool ProcessMaterialsForOneTick(IAssetRegistry& AssetRegistry, const UAssetAnalyticsSettings& Settings)
+		{
+			const double TickStartSeconds = FPlatformTime::Seconds();
+			const bool bLoadsAssets = NeedsAssetLoading(Settings);
+			const int32 MaterialsPerBatch = FMath::Max(Settings.AssetsPerTick, 1);
+			while (NextAssetIndex < PendingAssets.Num())
+			{
+				// Snapshot loaded packages so everything this batch loads, including dependencies, can be unloaded afterwards.
+				if (bLoadsAssets && MaterialsInBatch == 0)
+				{
+					PackagesBeforeBatch = Core::FReportPackageUnloader::GetLoadedPackages();
+					BatchStartSeconds = FPlatformTime::Seconds();
+					BatchLoadedAssetCount = 0;
+				}
+
+				const FAssetData& AssetData = PendingAssets[NextAssetIndex];
+				CurrentAssetName = AssetData.AssetName.ToString();
+				BatchLoadedAssetCount += ProcessMaterial(AssetRegistry, Settings, AssetData);
+				++NextAssetIndex;
+				++MaterialsInBatch;
+
+				const bool bBatchFinished = MaterialsInBatch >= MaterialsPerBatch || NextAssetIndex >= PendingAssets.Num();
+				if (bBatchFinished)
+				{
+					if (BatchLoadedAssetCount > 0)
+					{
+						// Unloading can wait on shader compiles, so it gets its own tick and message.
+						PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
+						Step = ERunnerStep::UnloadPackages;
+						ProgressNotification.SetText(FText::Format(
+							LOCTEXT("UnloadingMaterialPackages", "Material Analytics - {0} / {1}\nUnloading {2} packages..."),
+							FText::AsNumber(NextAssetIndex),
+							FText::AsNumber(PendingAssets.Num()),
+							FText::AsNumber(PackageUnloader.GetTrackedPackageCount())));
+						return true;
+					}
+					MaterialsInBatch = 0;
+				}
+				if (FPlatformTime::Seconds() - TickStartSeconds >= TickTimeBudgetSeconds) break;
+			}
+
+			if (NextAssetIndex >= PendingAssets.Num())
+			{
+				TickerHandle.Reset();
+				CompleteReport();
+				return false;
+			}
+			UpdateProgressNotification();
+			return true;
+		}
+
+		/**
+		 * Runs the current stage of the report and moves to the next one. Stages that block the editor run on their
+		 * own tick after their message is shown, so the notification always says what is happening.
+		 * Returns: True while the report is still running.
 		 */
 		bool Tick(float)
 		{
@@ -829,65 +891,73 @@ namespace Material
 				FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 			IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
-			const int32 BatchEnd = FMath::Min(NextAssetIndex + FMath::Max(Settings->AssetsPerTick, 1), PendingAssets.Num());
 
-			// Snapshot loaded packages so everything this batch loads, including dependencies, can be unloaded afterwards.
-			const double BatchStartSeconds = FPlatformTime::Seconds();
-			const bool bResolveUsersByLoading = Settings->bMaterialUserTypeCounts && Settings->bMaterialResolveUsersByLoading;
-			TSet<UPackage*> PackagesBeforeBatch;
-			if (Settings->bMaterialUsageFlags || bResolveUsersByLoading)
+			switch (Step)
 			{
-				PackagesBeforeBatch = Core::FReportPackageUnloader::GetLoadedPackages();
-			}
-			int32 LoadedAssetCount = 0;
+			case ERunnerStep::ShowNotification:
+				// The notification fades in over a few frames; blocking work before that would hide it.
+				if (FPlatformTime::Seconds() - StepStartSeconds < NotificationDisplayDelaySeconds) return true;
+				Step = NeedsInstanceTree(*Settings) ? ERunnerStep::WaitForAssetRegistry : ERunnerStep::FindMaterials;
+				return true;
 
-			for (; NextAssetIndex < BatchEnd; ++NextAssetIndex)
-			{
-				const FAssetData& AssetData = PendingAssets[NextAssetIndex];
-				if (Settings->bIgnoreUnreferencedAssets &&
-					!Core::HasRelevantReferencer(AssetRegistry, AssetData, Settings->bIgnoreDeveloperReferences)) continue;
-
-				FMaterialAssetData& Item = AssetItems.Emplace_GetRef(AssetData);
-				if (Settings->bMaterialPackageDiskSize)
+			case ERunnerStep::WaitForAssetRegistry:
+				// Polling instead of WaitForCompletion lets the registry keep scanning while the editor stays responsive.
+				if (AssetRegistry.IsLoadingAssets())
 				{
-					FAssetPackageData PackageData;
-					if (AssetRegistry.TryGetAssetPackageData(AssetData.PackageName, PackageData) ==
-						UE::AssetRegistry::EExists::Exists)
-					{
-						Item.PackageDiskSize = PackageData.DiskSize;
-					}
+					ProgressNotification.SetText(LOCTEXT("WaitingForAssetRegistry", "Material Analytics\nWaiting for the Asset Registry to finish scanning..."));
+					return true;
 				}
-				if (Settings->bMaterialInstanceCounts || Settings->bMaterialUserTypeCounts)
+				Step = ERunnerStep::FindMaterials;
+				ProgressNotification.SetText(LOCTEXT("ScanningMaterialFolders", "Material Analytics\nScanning material folders..."));
+				return true;
+
+			case ERunnerStep::FindMaterials:
+				FindMasterMaterials(AssetRegistry);
+				if (PendingAssets.Num() == 0)
 				{
-					Item.Instances = GatherCountedInstances(AssetRegistry, AssetData.GetSoftObjectPath(), *Settings);
-					if (Settings->bMaterialUserTypeCounts)
-					{
-						TArray<FAssetData> MaterialAndInstances = Item.Instances;
-						MaterialAndInstances.Add(AssetData);
-						GatherUsersByType(AssetRegistry, MaterialAndInstances, *Settings, Item);
-						if (bResolveUsersByLoading) LoadedAssetCount += ResolveUsersByLoading(Item, MaterialAndInstances);
-					}
+					TickerHandle.Reset();
+					CompleteReport();
+					return false;
 				}
-				if (Settings->bMaterialUsageFlags && ReadUsageFlags(AssetData, Item)) ++LoadedAssetCount;
-			}
-			if (LoadedAssetCount > 0)
-			{
-				PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
+				if (NeedsInstanceTree(*Settings))
+				{
+					Step = ERunnerStep::BuildInstanceTree;
+					ProgressNotification.SetText(LOCTEXT("BuildingInstanceTree", "Material Analytics\nBuilding the material instance tree..."));
+					return true;
+				}
+				Step = ERunnerStep::ProcessMaterials;
+				UpdateProgressNotification();
+				return true;
+
+			case ERunnerStep::BuildInstanceTree:
+				BuildInstanceTree(AssetRegistry);
+				Step = ERunnerStep::ProcessMaterials;
+				UpdateProgressNotification();
+				return true;
+
+			case ERunnerStep::ProcessMaterials:
+				return ProcessMaterialsForOneTick(AssetRegistry, *Settings);
+
+			case ERunnerStep::UnloadPackages:
 				PackageUnloader.UnloadReportPackages();
 				UE_LOG(
 					LogTemp,
 					Log,
-					TEXT("Material Analytics loaded and unloaded %d assets (master materials and users) in %.2f s."),
-					LoadedAssetCount,
+					TEXT("Material Analytics loaded and unloaded %d assets (master materials and users) for %d materials in %.2f s."),
+					BatchLoadedAssetCount,
+					MaterialsInBatch,
 					FPlatformTime::Seconds() - BatchStartSeconds);
-			}
-			UpdateProgressNotification();
-
-			if (NextAssetIndex >= PendingAssets.Num())
-			{
-				TickerHandle.Reset();
-				CompleteReport();
-				return false;
+				MaterialsInBatch = 0;
+				BatchLoadedAssetCount = 0;
+				if (NextAssetIndex >= PendingAssets.Num())
+				{
+					TickerHandle.Reset();
+					CompleteReport();
+					return false;
+				}
+				Step = ERunnerStep::ProcessMaterials;
+				UpdateProgressNotification();
+				return true;
 			}
 			return true;
 		}
@@ -913,7 +983,7 @@ namespace Material
 				*JsonPath,
 				FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 			{
-				FinishProgressNotification(
+				ProgressNotification.Finish(
 					LOCTEXT("MaterialJsonSaveFailed", "The material analytics JSON file could not be saved."),
 					SNotificationItem::CS_Fail);
 				ResetReportData();
@@ -923,7 +993,7 @@ namespace Material
 			UE_LOG(LogTemp, Log, TEXT("Asset Analytics saved the Material Analytics report to %s"), *FPaths::ConvertRelativePathToFull(JsonPath));
 			const FString ReportUrl = Core::GetMaterialAnalyticsReportUrl();
 			FPlatformProcess::LaunchURL(*ReportUrl, nullptr, nullptr);
-			FinishProgressNotification(
+			ProgressNotification.Finish(
 				FText::Format(
 					LOCTEXT("MaterialAnalyticsComplete", "Material Analytics report saved for {0} master materials."),
 					FText::AsNumber(AssetItems.Num())),
@@ -1039,7 +1109,9 @@ namespace Material
 			return JsonText;
 		}
 
-		static constexpr float NotificationDisplayDelaySeconds = 0.2f;
+		static constexpr double NotificationDisplayDelaySeconds = 0.2;
+		/** Longest time one tick spends processing materials before letting the editor repaint. */
+		static constexpr double TickTimeBudgetSeconds = 0.05;
 		TArray<FMaterialAssetData> AssetItems;
 		TArray<FAssetData> PendingAssets;
 		/** Direct child instances for every material or instance that has any, keyed by the parent's object path. */
@@ -1053,8 +1125,23 @@ namespace Material
 		/** Unloads the master materials loaded to read usage flags, after each batch. */
 		Core::FReportPackageUnloader PackageUnloader;
 		FTSTicker::FDelegateHandle TickerHandle;
-		TSharedPtr<SNotificationItem> ProgressNotificationItem;
+		/** Notification that shows the report progress and the Cancel button. */
+		Core::FReportProgressNotification ProgressNotification;
 		int32 NextAssetIndex = 0;
+		/** Stage the next Tick runs. */
+		ERunnerStep Step = ERunnerStep::ShowNotification;
+		/** When the report started, used to delay blocking work until the notification is visible. */
+		double StepStartSeconds = 0.0;
+		/** Materials processed in the current batch. */
+		int32 MaterialsInBatch = 0;
+		/** Assets loaded from disk in the current batch. */
+		int32 BatchLoadedAssetCount = 0;
+		/** When the current batch started, for the batch timing log. */
+		double BatchStartSeconds = 0.0;
+		/** Packages that were loaded before the current batch started. */
+		TSet<UPackage*> PackagesBeforeBatch;
+		/** Name of the last material processed, shown in the notification. */
+		FString CurrentAssetName;
 	};
 
 	static TUniquePtr<FMaterialAnalyticsRunner> MaterialAnalyticsRunner;
