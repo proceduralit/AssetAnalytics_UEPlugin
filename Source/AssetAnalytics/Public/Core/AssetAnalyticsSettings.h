@@ -139,4 +139,13 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Vertex Factory Users (Needs Asset Loading)"))
 	bool bMaterialResolveUsersByLoading = false;
+
+	/**
+	 * Counts the shader maps of each master on the editor's shader platform: the master and every counted instance
+	 * that overrides static parameters or base properties compile one shader map per quality level used by a
+	 * Quality Switch, plus one default. With Usage Flags on, also estimates the vertex factory permutations as
+	 * shader maps multiplied by enabled usage flags. Masters and instances are loaded and unloaded after each batch.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Shader Permutations (Needs Asset Loading)"))
+	bool bMaterialShaderPermutations = false;
 };

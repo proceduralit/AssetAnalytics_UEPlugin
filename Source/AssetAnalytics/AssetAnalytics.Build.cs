@@ -47,6 +47,8 @@ public class AssetAnalytics : ModuleRules
 				"ContentBrowser",
 				"HTTPServer",
 				"Json",
+				"MaterialShaderQualitySettings",
+				"RHI",
 				"Sockets",
 				"ToolMenus",
 				// ... add private dependencies that you statically link with here ...	

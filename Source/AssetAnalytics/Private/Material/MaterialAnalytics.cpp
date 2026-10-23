@@ -34,6 +34,11 @@
 #include "HAL/PlatformTime.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceConstant.h"
+#include "MaterialCachedData.h"
+#include "MaterialShaderQualitySettings.h"
+#include "RHIShaderPlatform.h"
+#include "SceneTypes.h"
+#include "ShaderPlatformQualitySettings.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/PackagePath.h"
@@ -155,7 +160,81 @@ namespace Material
 
 		/** Loaded users found for each EMaterialUsage flag, sorted. Empty when users were not loaded. */
 		TArray<TArray<FString>> ResolvedUserPathsByUsage;
+
+		/** Whether the counted instances were loaded to find which ones compile their own shader map. */
+		bool bShaderPermutationsRead = false;
+
+		/** Counted instances that compile their own shader map, sorted. */
+		TArray<FString> StaticPermutationInstancePaths;
+
+		/** Quality levels the master's Quality Switch nodes give their own shader map. */
+		TArray<FString> QualityLevelsUsed;
+
+		/** Shader maps of the master and its static permutation instances, including quality levels. */
+		int32 ShaderMapCount = INDEX_NONE;
 	};
+
+	/** Quality levels that compile their own shader map for one material, and the shader map count they produce. */
+	struct FQualityShaderMaps
+	{
+		/** Quality levels whose Quality Switch inputs differ, or that a platform quality override forces. */
+		TArray<EMaterialQualityLevel::Type> UsedLevels;
+
+		/** One shader map per used level, plus one default shader map for the levels that are not used. */
+		int32 ShaderMapCount = 1;
+	};
+
+	/**
+	 * Finds how many shader maps Material compiles across quality levels on ShaderPlatform when cooking.
+	 * It repeats UMaterialInterface::GetQualityLevelUsage (not exported from the Engine module) and
+	 * UMaterial::GetNewResources: each used quality level gets its own shader map, and the unused levels share a
+	 * default one unless the platform discards them when cooking.
+	 */
+	static FQualityShaderMaps GetQualityShaderMaps(const UMaterialInterface& Material, const EShaderPlatform ShaderPlatform)
+	{
+		// Quality levels whose Quality Switch inputs differ, including switches inside material functions.
+		const TArray<bool>& SwitchQualityLevelsUsed = Material.GetCachedExpressionData().QualityLevelsUsed;
+		const UShaderPlatformQualitySettings* QualitySettings =
+			UMaterialShaderQualitySettings::Get()->GetShaderPlatformQualitySettings(ShaderPlatform);
+
+		FQualityShaderMaps Result;
+		Result.ShaderMapCount = 0;
+		bool bNeedsDefaultShaderMap = false;
+		for (int32 QualityIndex = 0; QualityIndex < EMaterialQualityLevel::Num; ++QualityIndex)
+		{
+			const EMaterialQualityLevel::Type QualityLevel = static_cast<EMaterialQualityLevel::Type>(QualityIndex);
+			bool bQualityLevelUsed = SwitchQualityLevelsUsed.IsValidIndex(QualityIndex) && SwitchQualityLevelsUsed[QualityIndex];
+			bool bDiscardedWhenCooking = false;
+			if (QualitySettings != nullptr)
+			{
+				const FMaterialQualityOverrides& QualityOverrides = QualitySettings->GetQualityOverrides(QualityLevel);
+				if (QualityOverrides.bDiscardQualityDuringCook)
+				{
+					bQualityLevelUsed = false;
+					bDiscardedWhenCooking = true;
+				}
+				else if (QualityOverrides.bEnableOverride &&
+					QualityOverrides.HasAnyOverridesSet() &&
+					QualityOverrides.CanOverride(ShaderPlatform))
+				{
+					// Platform quality overrides change the shader, so this level compiles separately too.
+					bQualityLevelUsed = true;
+				}
+			}
+
+			if (bQualityLevelUsed)
+			{
+				Result.UsedLevels.Add(QualityLevel);
+				++Result.ShaderMapCount;
+			}
+			else if (!bDiscardedWhenCooking)
+			{
+				bNeedsDefaultShaderMap = true;
+			}
+		}
+		if (bNeedsDefaultShaderMap) ++Result.ShaderMapCount;
+		return Result;
+	}
 
 	/**
 	 * Decides which kind of placed World Partition actor uses a material, from the actor's class.
@@ -674,14 +753,64 @@ namespace Material
 		/** Returns whether the enabled settings need the material instance tree. */
 		static bool NeedsInstanceTree(const UAssetAnalyticsSettings& Settings)
 		{
-			return Settings.bMaterialInstanceCounts || Settings.bMaterialUserTypeCounts;
+			return Settings.bMaterialInstanceCounts || Settings.bMaterialUserTypeCounts || Settings.bMaterialShaderPermutations;
 		}
 
 		/** Returns whether the enabled settings load assets, so batches must be unloaded. */
 		static bool NeedsAssetLoading(const UAssetAnalyticsSettings& Settings)
 		{
 			return Settings.bMaterialUsageFlags ||
+				Settings.bMaterialShaderPermutations ||
 				(Settings.bMaterialUserTypeCounts && Settings.bMaterialResolveUsersByLoading);
+		}
+
+		/**
+		 * Loads a master and its counted instances to count their shader maps on the editor's shader platform.
+		 * Instances that override static parameters or base properties compile their own shader maps; instances
+		 * with identical overrides are still counted separately, although they may share cached shaders.
+		 * Each of these materials compiles one shader map per quality level used by a Quality Switch, plus a default.
+		 * Output: Fills the shader map fields of Item and sets Item.bShaderPermutationsRead.
+		 * Returns: The number of materials loaded from disk.
+		 */
+		static int32 ReadStaticPermutations(const FAssetData& MasterData, FMaterialAssetData& Item)
+		{
+			int32 LoadedAssetCount = 0;
+			const bool bWasMasterLoaded = MasterData.IsAssetLoaded();
+			UMaterial* MasterMaterial = Cast<UMaterial>(MasterData.GetAsset());
+			if (MasterMaterial == nullptr)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material %s to count its shader maps."), *MasterData.GetObjectPathString());
+				return LoadedAssetCount;
+			}
+			if (!bWasMasterLoaded) ++LoadedAssetCount;
+
+			const EShaderPlatform ShaderPlatform = GMaxRHIShaderPlatform;
+			const FQualityShaderMaps MasterQuality = GetQualityShaderMaps(*MasterMaterial, ShaderPlatform);
+			for (const EMaterialQualityLevel::Type QualityLevel : MasterQuality.UsedLevels)
+			{
+				Item.QualityLevelsUsed.Add(LexToString(QualityLevel));
+			}
+			int32 ShaderMapCount = MasterQuality.ShaderMapCount;
+
+			for (const FAssetData& InstanceData : Item.Instances)
+			{
+				const bool bWasAssetLoaded = InstanceData.IsAssetLoaded();
+				UMaterialInstance* Instance = Cast<UMaterialInstance>(InstanceData.GetAsset());
+				if (Instance == nullptr)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material instance %s to check its shader map."), *InstanceData.GetObjectPathString());
+					continue;
+				}
+				if (!bWasAssetLoaded) ++LoadedAssetCount;
+				if (!Instance->bHasStaticPermutationResource) continue;
+
+				Item.StaticPermutationInstancePaths.Add(InstanceData.GetObjectPathString());
+				ShaderMapCount += GetQualityShaderMaps(*Instance, ShaderPlatform).ShaderMapCount;
+			}
+			Item.StaticPermutationInstancePaths.Sort();
+			Item.ShaderMapCount = ShaderMapCount;
+			Item.bShaderPermutationsRead = true;
+			return LoadedAssetCount;
 		}
 
 		/**
@@ -821,6 +950,7 @@ namespace Material
 				}
 			}
 			if (Settings.bMaterialUsageFlags && ReadUsageFlags(AssetData, Item)) ++LoadedAssetCount;
+			if (Settings.bMaterialShaderPermutations) LoadedAssetCount += ReadStaticPermutations(AssetData, Item);
 			return LoadedAssetCount;
 		}
 
@@ -1032,6 +1162,34 @@ namespace Material
 			{
 				// False when the master could not be loaded, so missing Enabled values are not read as "disabled".
 				Writer.WriteValue(TEXT("UsageFlagsRead"), Item.UsageEnabled.Num() > 0);
+			}
+			if (Item.bShaderPermutationsRead)
+			{
+				const int32 ShaderMapCount = Item.ShaderMapCount;
+				Writer.WriteValue(TEXT("ShaderMapCount"), ShaderMapCount);
+				Writer.WriteArrayStart(TEXT("QualityLevelsUsed"));
+				for (const FString& QualityLevel : Item.QualityLevelsUsed)
+				{
+					Writer.WriteValue(QualityLevel);
+				}
+				Writer.WriteArrayEnd();
+				Writer.WriteArrayStart(TEXT("StaticPermutationInstances"));
+				for (const FString& InstancePath : Item.StaticPermutationInstancePaths)
+				{
+					Writer.WriteValue(InstancePath);
+				}
+				Writer.WriteArrayEnd();
+
+				// A rough indicator only: every shader map compiles shaders for every enabled usage flag.
+				if (Item.UsageEnabled.Num() > 0)
+				{
+					int32 EnabledUsageCount = 0;
+					for (const bool bUsageEnabled : Item.UsageEnabled)
+					{
+						if (bUsageEnabled) ++EnabledUsageCount;
+					}
+					Writer.WriteValue(TEXT("EstimatedVertexFactoryPermutations"), ShaderMapCount * EnabledUsageCount);
+				}
 			}
 			if (Settings.bMaterialUserTypeCounts || Settings.bMaterialUsageFlags)
 			{

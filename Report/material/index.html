@@ -24,25 +24,6 @@
         });
     </script>
     <style>
-        .status-legend {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px 20px;
-            padding-top: 14px;
-            color: #9ba4ae;
-            font-size: 14px;
-        }
-
-        .status-legend span::before {
-            content: "";
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            margin-right: 7px;
-            border-radius: 50%;
-            background: var(--swatch);
-        }
-
         .material-details {
             margin-top: 26px;
             padding: 20px 22px;
@@ -184,13 +165,6 @@
             </div>
             <div id="drop-overlay" aria-hidden="true">Drop JSON to load</div>
         </section>
-
-        <div class="status-legend" aria-label="Point colours">
-            <span style="--swatch: #ff5c6c">Used but usage not enabled</span>
-            <span style="--swatch: #ffb347">Usage enabled but unused</span>
-            <span style="--swatch: #3ecf8e">Usage flags match users</span>
-            <span style="--swatch: #36a3ff">Usage flags not checked</span>
-        </div>
 
         <section class="asset-action" aria-label="Selected graph material">
             <div>

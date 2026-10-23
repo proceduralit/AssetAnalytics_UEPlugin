@@ -17,12 +17,12 @@
     const detailsPanel = document.getElementById("material-details");
     const reportBridgeUrl = "http://127.0.0.1:19842/asset-analytics/select";
 
-    // Overall usage status of a material, used for point colours and the details table.
+    // Usage status of a material or one of its vertex factories, shown in the details table and the Usage Status filter.
     const usageStatuses = {
-        usedNotEnabled: { label: "Used but not enabled", className: "used-not-enabled", color: "#ff5c6c", border: "#ffc2c8" },
-        enabledUnused: { label: "Enabled but unused", className: "enabled-unused", color: "#ffb347", border: "#ffe0b0" },
-        ok: { label: "Flags match users", className: "ok", color: "#3ecf8e", border: "#bdf2d9" },
-        notChecked: { label: "Not checked", className: "unknown", color: "#36a3ff", border: "#b9ddff" }
+        usedNotEnabled: { label: "Used but not enabled", className: "used-not-enabled" },
+        enabledUnused: { label: "Enabled but unused", className: "enabled-unused" },
+        ok: { label: "Flags match users", className: "ok" },
+        notChecked: { label: "Not checked", className: "unknown" }
     };
 
     // Every value offered in the graph menus. "axis" adds it to the X/Y menus, "filter" to the filter menu.
@@ -33,6 +33,10 @@
             value: material => material.PackageDiskSize },
         { key: "InstanceCount", label: "Instances", type: "number", axis: true, filter: true,
             value: material => material.InstanceCount },
+        { key: "ShaderMapCount", label: "Shader Maps", type: "number", axis: true, filter: true,
+            value: material => material.ShaderMapCount },
+        { key: "EstimatedVertexFactoryPermutations", label: "Estimated Vertex Factory Permutations", type: "number", axis: true, filter: true,
+            value: material => material.EstimatedVertexFactoryPermutations },
         { key: "TotalUsers", label: "Total Users", type: "number", axis: true, filter: true,
             value: material => hasUsers(material) ? countUsers(material) : undefined },
         { key: "EnabledUsageFlags", label: "Enabled Usage Flags", type: "number", axis: true, filter: true,
@@ -41,6 +45,10 @@
             value: material => material.UsageFlagsRead ? summarizeUsage(material).usedNotEnabledCount : undefined },
         { key: "EnabledUnusedFlags", label: "Enabled but Unused Flags", type: "number", axis: true, filter: true,
             value: material => material.UsageFlagsRead ? summarizeUsage(material).enabledUnusedCount : undefined },
+        { key: "UsesQualitySwitch", label: "Uses Quality Switch", type: "string", filter: true,
+            value: material => Array.isArray(material.QualityLevelsUsed)
+                ? (material.QualityLevelsUsed.length > 0 ? "Yes" : "No")
+                : undefined },
         { key: "UsageStatus", label: "Usage Status", type: "string", filter: true,
             value: material => summarizeUsage(material).status.label },
         { key: "PackagePath", label: "Package Path", type: "string", filter: true,
@@ -561,13 +569,13 @@
                 point.row.materialIndex
             ]),
             marker: {
-                color: points.map(point => point.materialStatus.color),
-                line: { color: points.map(point => point.materialStatus.border), width: 1 },
+                color: "#36a3ff",
+                line: { color: "#b9ddff", width: 1 },
                 opacity: 0.76,
                 size: 10
             },
             selected: {
-                marker: { color: "#ffffff", opacity: 1, size: 14 }
+                marker: { color: "#ffb347", opacity: 1, size: 14 }
             },
             unselected: {
                 marker: { opacity: 0.28 }
@@ -707,9 +715,34 @@
         if (material.UsageFlagsRead === true) {
             addSummaryItem(summary, "Enabled usage flags", usage.enabledCount.toLocaleString());
         }
+        if (typeof material.ShaderMapCount === "number") {
+            addSummaryItem(summary, "Shader maps", material.ShaderMapCount.toLocaleString());
+        }
+        if (Array.isArray(material.QualityLevelsUsed)) {
+            addSummaryItem(summary, "Quality levels used", material.QualityLevelsUsed.length > 0
+                ? material.QualityLevelsUsed.join(", ")
+                : "None (no Quality Switch)");
+        }
+        if (typeof material.EstimatedVertexFactoryPermutations === "number") {
+            addSummaryItem(summary, "Estimated vertex factory permutations",
+                material.EstimatedVertexFactoryPermutations.toLocaleString());
+        }
         detailsPanel.append(title, path, summary);
 
         detailsPanel.append(createVertexFactoryTable(material));
+
+        if (Array.isArray(material.StaticPermutationInstances)) {
+            const heading = document.createElement("h3");
+            heading.textContent = "Instances with their own shader map";
+            if (material.StaticPermutationInstances.length === 0) {
+                const none = document.createElement("p");
+                none.className = "path-text";
+                none.textContent = "None. Every counted instance shares the master's shader map.";
+                detailsPanel.append(heading, none);
+            } else {
+                detailsPanel.append(heading, createPathList(material.StaticPermutationInstances, "instance"));
+            }
+        }
 
         if (Array.isArray(material.Instances)) {
             const heading = document.createElement("h3");
