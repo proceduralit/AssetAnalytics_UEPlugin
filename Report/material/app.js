@@ -35,6 +35,8 @@
             value: material => material.InstanceCount },
         { key: "ShaderMapCount", label: "Shader Maps", type: "number", axis: true, filter: true,
             value: material => material.ShaderMapCount },
+        { key: "UniqueStaticPermutations", label: "Unique Static Permutations", type: "number", axis: true, filter: true,
+            value: material => material.UniqueStaticPermutations },
         { key: "EstimatedVertexFactoryPermutations", label: "Estimated Vertex Factory Permutations", type: "number", axis: true, filter: true,
             value: material => material.EstimatedVertexFactoryPermutations },
         { key: "TotalUsers", label: "Total Users", type: "number", axis: true, filter: true,
@@ -718,6 +720,21 @@
         if (typeof material.ShaderMapCount === "number") {
             addSummaryItem(summary, "Shader maps", material.ShaderMapCount.toLocaleString());
         }
+        if (typeof material.UniqueStaticPermutations === "number") {
+            addSummaryItem(summary, "Unique static permutations", material.UniqueStaticPermutations.toLocaleString());
+        }
+        const reasons = material.StaticPermutationReasons;
+        if (reasons) {
+            const reasonText = [
+                ["Static switches", reasons.StaticSwitches],
+                ["Material layers", reasons.MaterialLayers],
+                ["Base properties", reasons.BaseProperties],
+                ["Other", reasons.Other]
+            ].filter(([, count]) => count > 0)
+                .map(([label, count]) => `${label} ${count.toLocaleString()}`)
+                .join(" · ");
+            addSummaryItem(summary, "Own shader map because of", reasonText || "None");
+        }
         if (Array.isArray(material.QualityLevelsUsed)) {
             addSummaryItem(summary, "Quality levels used", material.QualityLevelsUsed.length > 0
                 ? material.QualityLevelsUsed.join(", ")
@@ -730,6 +747,10 @@
         detailsPanel.append(title, path, summary);
 
         detailsPanel.append(createVertexFactoryTable(material));
+
+        if (Array.isArray(material.StaticSwitches)) {
+            detailsPanel.append(createStaticSwitchTable(material.StaticSwitches));
+        }
 
         if (Array.isArray(material.StaticPermutationInstances)) {
             const heading = document.createElement("h3");
@@ -822,6 +843,43 @@
                 usersCell.textContent = "Unknown without loading users";
                 usersCell.className = "path-text";
             }
+        });
+        fragment.append(table);
+        return fragment;
+    }
+
+    // Lists the master's static switches with how many counted instances set them to the non-default value.
+    function createStaticSwitchTable(staticSwitches) {
+        const fragment = document.createDocumentFragment();
+        const heading = document.createElement("h3");
+        heading.textContent = "Static switches";
+        fragment.append(heading);
+
+        if (staticSwitches.length === 0) {
+            const none = document.createElement("p");
+            none.className = "path-text";
+            none.textContent = "The material has no static switches.";
+            fragment.append(none);
+            return fragment;
+        }
+
+        const sortedSwitches = [...staticSwitches].sort((left, right) =>
+            (right.ChangedCount ?? 0) - (left.ChangedCount ?? 0) ||
+            String(left.Name).localeCompare(String(right.Name)));
+        const table = document.createElement("table");
+        table.className = "vertex-factory-table";
+        const head = table.createTHead().insertRow();
+        ["Static switch", "Default", "Instances changing it"].forEach(text => {
+            const cell = document.createElement("th");
+            cell.textContent = text;
+            head.append(cell);
+        });
+        const body = table.createTBody();
+        sortedSwitches.forEach(staticSwitch => {
+            const row = body.insertRow();
+            row.insertCell().textContent = staticSwitch.Name ?? "";
+            row.insertCell().textContent = staticSwitch.Default ? "True" : "False";
+            row.insertCell().textContent = (staticSwitch.ChangedCount ?? 0).toLocaleString();
         });
         fragment.append(table);
         return fragment;

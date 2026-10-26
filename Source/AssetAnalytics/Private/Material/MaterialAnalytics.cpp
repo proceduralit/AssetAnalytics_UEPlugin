@@ -39,6 +39,7 @@
 #include "RHIShaderPlatform.h"
 #include "SceneTypes.h"
 #include "ShaderPlatformQualitySettings.h"
+#include "StaticParameterSet.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/PackagePath.h"
@@ -138,6 +139,19 @@ namespace Material
 		FString Path;
 	};
 
+	/** One static switch of a master and how often its counted instances change it. */
+	struct FStaticSwitchSummary
+	{
+		/** Identifies the switch, including its layer when it comes from a material layer. */
+		FMaterialParameterInfo ParameterInfo;
+
+		/** Value the master uses when an instance does not override the switch. */
+		bool bDefaultValue = false;
+
+		/** Counted instances that override the switch with a value different from the default. */
+		int32 ChangedCount = 0;
+	};
+
 	struct FMaterialAssetData
 	{
 		/** Creates an empty report row for InAssetData. */
@@ -172,6 +186,55 @@ namespace Material
 
 		/** Shader maps of the master and its static permutation instances, including quality levels. */
 		int32 ShaderMapCount = INDEX_NONE;
+
+		/** Static switches of the master, with how many counted instances change them. */
+		TArray<FStaticSwitchSummary> StaticSwitches;
+
+		/** Static permutation instances whose chain overrides static switches, layers or base properties, or none of them. */
+		int32 SwitchPermutationCount = 0;
+		int32 LayerPermutationCount = 0;
+		int32 BasePropertyPermutationCount = 0;
+		int32 OtherPermutationCount = 0;
+
+		/** Distinct combinations of static parameters and base property overrides among the static permutation instances. */
+		int32 UniqueStaticPermutationCount = 0;
+	};
+
+	/** What an instance and its parent instances override, which explains why it compiles its own shader map. */
+	struct FStaticPermutationReasons
+	{
+		bool bStaticSwitches = false;
+		bool bMaterialLayers = false;
+		bool bBaseProperties = false;
+	};
+
+	/**
+	 * Collects the overrides of Instance and its parent instances, because a child inherits its parents'
+	 * static overrides and so compiles its own shader map even when it sets nothing itself.
+	 */
+	static FStaticPermutationReasons FindStaticPermutationReasons(const UMaterialInstance& Instance)
+	{
+		FStaticPermutationReasons Reasons;
+		Reasons.bBaseProperties = Instance.HasOverridenBaseProperties();
+		for (const UMaterialInstance* ChainInstance = &Instance;
+			ChainInstance != nullptr;
+			ChainInstance = Cast<UMaterialInstance>(ChainInstance->Parent))
+		{
+			const FStaticParameterSet OwnStaticParameters = ChainInstance->GetStaticParameters();
+			if (OwnStaticParameters.bHasMaterialLayers) Reasons.bMaterialLayers = true;
+			for (const FStaticSwitchParameter& SwitchParameter : OwnStaticParameters.StaticSwitchParameters)
+			{
+				if (SwitchParameter.bOverride) Reasons.bStaticSwitches = true;
+			}
+		}
+		return Reasons;
+	}
+
+	/** Effective static parameters and base property overrides of one static permutation instance, used to group equal ones. */
+	struct FStaticPermutationKey
+	{
+		FStaticParameterSet StaticParameters;
+		uint64 BasePropertyOverridesHash = 0;
 	};
 
 	/** Quality levels that compile their own shader map for one material, and the shader map count they produce. */
@@ -792,6 +855,21 @@ namespace Material
 			}
 			int32 ShaderMapCount = MasterQuality.ShaderMapCount;
 
+			TArray<FMaterialParameterInfo> SwitchInfos;
+			TArray<FGuid> SwitchGuids;
+			MasterMaterial->GetAllParameterInfoOfType(EMaterialParameterType::StaticSwitch, SwitchInfos, SwitchGuids);
+			for (const FMaterialParameterInfo& SwitchInfo : SwitchInfos)
+			{
+				FStaticSwitchSummary& Summary = Item.StaticSwitches.AddDefaulted_GetRef();
+				Summary.ParameterInfo = SwitchInfo;
+				FGuid DefaultExpressionGuid;
+				MasterMaterial->GetStaticSwitchParameterDefaultValue(
+					FHashedMaterialParameterInfo(SwitchInfo),
+					Summary.bDefaultValue,
+					DefaultExpressionGuid);
+			}
+
+			TArray<FStaticPermutationKey> PermutationKeys;
 			for (const FAssetData& InstanceData : Item.Instances)
 			{
 				const bool bWasAssetLoaded = InstanceData.IsAssetLoaded();
@@ -802,11 +880,42 @@ namespace Material
 					continue;
 				}
 				if (!bWasAssetLoaded) ++LoadedAssetCount;
+
+				// Only the instance's own overrides count; overrides inherited from a parent instance are counted there.
+				for (const FStaticSwitchParameter& SwitchParameter : Instance->GetStaticParameters().StaticSwitchParameters)
+				{
+					if (!SwitchParameter.bOverride) continue;
+					FStaticSwitchSummary* Summary = Item.StaticSwitches.FindByPredicate(
+						[&SwitchParameter](const FStaticSwitchSummary& Candidate)
+						{
+							return Candidate.ParameterInfo == SwitchParameter.ParameterInfo;
+						});
+					if (Summary != nullptr && SwitchParameter.Value != Summary->bDefaultValue) ++Summary->ChangedCount;
+				}
+
 				if (!Instance->bHasStaticPermutationResource) continue;
 
 				Item.StaticPermutationInstancePaths.Add(InstanceData.GetObjectPathString());
 				ShaderMapCount += GetQualityShaderMaps(*Instance, ShaderPlatform).ShaderMapCount;
+
+				const FStaticPermutationReasons Reasons = FindStaticPermutationReasons(*Instance);
+				if (Reasons.bStaticSwitches) ++Item.SwitchPermutationCount;
+				if (Reasons.bMaterialLayers) ++Item.LayerPermutationCount;
+				if (Reasons.bBaseProperties) ++Item.BasePropertyPermutationCount;
+				if (!Reasons.bStaticSwitches && !Reasons.bMaterialLayers && !Reasons.bBaseProperties) ++Item.OtherPermutationCount;
+
+				// Instances with equal effective static parameters and base property overrides compile the same shaders.
+				FStaticPermutationKey Key;
+				Instance->GetStaticParameterValues(Key.StaticParameters);
+				Key.BasePropertyOverridesHash = Instance->GetBasePropertyOverridesHash();
+				const bool bAlreadySeen = PermutationKeys.ContainsByPredicate([&Key](const FStaticPermutationKey& SeenKey)
+				{
+					return SeenKey.BasePropertyOverridesHash == Key.BasePropertyOverridesHash &&
+						SeenKey.StaticParameters.Equivalent(Key.StaticParameters);
+				});
+				if (!bAlreadySeen) PermutationKeys.Add(MoveTemp(Key));
 			}
+			Item.UniqueStaticPermutationCount = PermutationKeys.Num();
 			Item.StaticPermutationInstancePaths.Sort();
 			Item.ShaderMapCount = ShaderMapCount;
 			Item.bShaderPermutationsRead = true;
@@ -1171,6 +1280,26 @@ namespace Material
 				for (const FString& QualityLevel : Item.QualityLevelsUsed)
 				{
 					Writer.WriteValue(QualityLevel);
+				}
+				Writer.WriteArrayEnd();
+				// An instance can have several reasons, so these counts can add up to more than the static permutation instances.
+				Writer.WriteObjectStart(TEXT("StaticPermutationReasons"));
+				Writer.WriteValue(TEXT("StaticSwitches"), Item.SwitchPermutationCount);
+				Writer.WriteValue(TEXT("MaterialLayers"), Item.LayerPermutationCount);
+				Writer.WriteValue(TEXT("BaseProperties"), Item.BasePropertyPermutationCount);
+				Writer.WriteValue(TEXT("Other"), Item.OtherPermutationCount);
+				Writer.WriteObjectEnd();
+				Writer.WriteValue(TEXT("UniqueStaticPermutations"), Item.UniqueStaticPermutationCount);
+
+				// ChangedCount: counted instances overriding the switch with the value opposite to its default.
+				Writer.WriteArrayStart(TEXT("StaticSwitches"));
+				for (const FStaticSwitchSummary& StaticSwitch : Item.StaticSwitches)
+				{
+					Writer.WriteObjectStart();
+					Writer.WriteValue(TEXT("Name"), StaticSwitch.ParameterInfo.Name.ToString());
+					Writer.WriteValue(TEXT("Default"), StaticSwitch.bDefaultValue);
+					Writer.WriteValue(TEXT("ChangedCount"), StaticSwitch.ChangedCount);
+					Writer.WriteObjectEnd();
 				}
 				Writer.WriteArrayEnd();
 				Writer.WriteArrayStart(TEXT("StaticPermutationInstances"));
