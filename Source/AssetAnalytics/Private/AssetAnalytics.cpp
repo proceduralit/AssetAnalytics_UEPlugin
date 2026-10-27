@@ -16,8 +16,13 @@ FAssetAnalyticsModule::~FAssetAnalyticsModule() = default;
 /** Starts the report service and registers the report menu actions. */
 void FAssetAnalyticsModule::StartupModule()
 {
-	ReportBridge = MakeUnique<AssetAnalytics::Core::FAssetAnalyticsReportBridge>();
-	ReportBridge->Start();
+	// Commandlets such as the cooker never serve reports, and binding the port while an editor
+	// already holds it logs an engine error that fails the commandlet.
+	if (!IsRunningCommandlet())
+	{
+		ReportBridge = MakeUnique<AssetAnalytics::Core::FAssetAnalyticsReportBridge>();
+		ReportBridge->Start();
+	}
 
 	UToolMenus::RegisterStartupCallback(
 		FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FAssetAnalyticsModule::RegisterMenus));
