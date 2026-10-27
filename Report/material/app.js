@@ -38,21 +38,13 @@
             value: material => material.PackageDiskSize },
         { key: "InstanceCount", label: "Instances", type: "number", axis: true, filter: true,
             value: material => material.InstanceCount },
-        { key: "ShaderMapCount", label: "Shader Maps", type: "number", axis: true, filter: true,
-            value: material => material.ShaderMapCount },
-        { key: "UniqueStaticPermutations", label: "Unique Static Permutations", type: "number", axis: true, filter: true,
-            value: material => material.UniqueStaticPermutations },
-        { key: "EstimatedVertexFactoryPermutations", label: "Estimated Vertex Factory Permutations", type: "number", axis: true, filter: true,
-            value: material => material.EstimatedVertexFactoryPermutations },
-        { key: "ShaderCount", label: "Shader Count (Layout Estimate)", type: "number", axis: true, filter: true,
-            value: material => material.ShaderCount },
-        // The cook columns only have values while a cook stats CSV is loaded.
-        { key: "CookedShaders", label: "Cooked Shaders", type: "number", axis: true, filter: true,
-            value: material => cookedByMaterial.get(material)?.shaders },
-        { key: "CookedShaderMaps", label: "Cooked Shader Maps", type: "number", axis: true, filter: true,
-            value: material => cookedByMaterial.get(material)?.shaderMaps },
-        { key: "BestShaderCount", label: "Shader Count (Cooked, else Estimate)", type: "number", axis: true, filter: true,
-            value: material => cookStats ? cookedByMaterial.get(material)?.shaders ?? material.ShaderCount : undefined },
+        // Shader Maps and Shader Count use the loaded cook stats CSV when there is one, otherwise the report's estimate.
+        // Shader maps are the master plus one per unique static permutation, as each gets its own shader map when cooked.
+        { key: "ShaderMaps", label: "Shader Maps", type: "number", axis: true, filter: true,
+            value: material => cookedByMaterial.get(material)?.shaderMaps ??
+                (typeof material.UniqueStaticPermutations === "number" ? material.UniqueStaticPermutations + 1 : undefined) },
+        { key: "ShaderCount", label: "Shader Count", type: "number", axis: true, filter: true,
+            value: material => cookedByMaterial.get(material)?.shaders ?? material.ShaderCount },
         { key: "ShaderCountSource", label: "Shader Count Source", type: "string", filter: true,
             value: material => cookStats ? shaderCountSource(material) : undefined },
         { key: "TotalUsers", label: "Total Users", type: "number", axis: true, filter: true,
@@ -972,7 +964,7 @@
             addSummaryItem(summary, "Enabled usage flags", usage.enabledCount.toLocaleString());
         }
         if (typeof material.ShaderMapCount === "number") {
-            addSummaryItem(summary, "Shader maps", material.ShaderMapCount.toLocaleString());
+            addSummaryItem(summary, "Shader maps, counting duplicate instances", material.ShaderMapCount.toLocaleString());
         }
         if (typeof material.UniqueStaticPermutations === "number") {
             addSummaryItem(summary, "Unique static permutations", material.UniqueStaticPermutations.toLocaleString());
@@ -993,10 +985,6 @@
             addSummaryItem(summary, "Quality levels used", material.QualityLevelsUsed.length > 0
                 ? material.QualityLevelsUsed.join(", ")
                 : "None (no Quality Switch)");
-        }
-        if (typeof material.EstimatedVertexFactoryPermutations === "number") {
-            addSummaryItem(summary, "Estimated vertex factory permutations",
-                material.EstimatedVertexFactoryPermutations.toLocaleString());
         }
         if (typeof material.ShaderCount === "number") {
             addSummaryItem(summary, "Shader count (layout estimate)", material.ShaderCount.toLocaleString());

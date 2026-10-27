@@ -191,9 +191,6 @@ namespace Material
 		/** Shader maps of the master and its static permutation instances, including quality levels. */
 		int32 ShaderMapCount = INDEX_NONE;
 
-		/** Shader maps of the master and one instance per unique static permutation, including quality levels. */
-		int32 UniqueShaderMapCount = INDEX_NONE;
-
 		/** Shaders the master and one instance per unique static permutation compile, from the engine's shader map layout. */
 		int32 LayoutShaderCount = INDEX_NONE;
 
@@ -905,7 +902,6 @@ namespace Material
 				Item.QualityLevelsUsed.Add(LexToString(QualityLevel));
 			}
 			int32 ShaderMapCount = MasterQuality.ShaderMapCount;
-			int32 UniqueShaderMapCount = MasterQuality.ShaderMapCount;
 			// The cooked game for the editor's own OS, such as Windows, so editor-only shaders are left out of the layout.
 			const ITargetPlatform* CookedPlatform = GetTargetPlatformManagerRef().FindTargetPlatform(FPlatformProperties::IniPlatformName());
 			int32 LayoutShaderCount = CountLayoutShaders(*MasterMaterial, ShaderPlatform, CookedPlatform, 1, Item.LayoutShadersByVertexFactory);
@@ -972,7 +968,6 @@ namespace Material
 				if (!bAlreadySeen)
 				{
 					PermutationKeys.Add(MoveTemp(Key));
-					UniqueShaderMapCount += InstanceShaderMapCount;
 					// The layout only covers the instance's active quality level, so it is repeated for each quality shader map.
 					// GetShaderTypes asserts that static permutation instances are constant instances.
 					if (Instance->IsA<UMaterialInstanceConstant>())
@@ -984,7 +979,6 @@ namespace Material
 			Item.UniqueStaticPermutationCount = PermutationKeys.Num();
 			Item.StaticPermutationInstancePaths.Sort();
 			Item.ShaderMapCount = ShaderMapCount;
-			Item.UniqueShaderMapCount = UniqueShaderMapCount;
 			Item.LayoutShaderCount = LayoutShaderCount;
 			Item.bShaderPermutationsRead = true;
 			return LoadedAssetCount;
@@ -1392,18 +1386,6 @@ namespace Material
 					Writer.WriteValue(InstancePath);
 				}
 				Writer.WriteArrayEnd();
-
-				// A rough indicator only: every unique shader map compiles shaders for every enabled usage flag.
-				// Instances with the same static permutation share their shaders when cooked, so they are counted once.
-				if (Item.UsageEnabled.Num() > 0)
-				{
-					int32 EnabledUsageCount = 0;
-					for (const bool bUsageEnabled : Item.UsageEnabled)
-					{
-						if (bUsageEnabled) ++EnabledUsageCount;
-					}
-					Writer.WriteValue(TEXT("EstimatedVertexFactoryPermutations"), Item.UniqueShaderMapCount * EnabledUsageCount);
-				}
 			}
 			if (Settings.bMaterialUserTypeCounts || Settings.bMaterialUsageFlags)
 			{
