@@ -50,6 +50,7 @@ public class AssetAnalytics : ModuleRules
 				"MaterialShaderQualitySettings",
 				"RHI",
 				"Sockets",
+				"TargetPlatform",
 				"ToolMenus",
 				// ... add private dependencies that you statically link with here ...	
 			}
