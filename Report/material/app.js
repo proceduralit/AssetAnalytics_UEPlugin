@@ -15,6 +15,11 @@
     const fileSummary = document.getElementById("file-summary");
     const status = document.getElementById("status");
     const detailsPanel = document.getElementById("material-details");
+    const chooseCookStatsButton = document.getElementById("choose-cook-stats");
+    const cookStatsInput = document.getElementById("cook-stats-file");
+    const cookPlatformSelect = document.getElementById("cook-platform");
+    const cookStatsSummary = document.getElementById("cook-stats-summary");
+    const defaultCookStatsSummary = cookStatsSummary.textContent;
     const reportBridgeUrl = "http://127.0.0.1:19842/asset-analytics/select";
 
     // Usage status of a material or one of its vertex factories, shown in the details table and the Usage Status filter.
@@ -39,6 +44,17 @@
             value: material => material.UniqueStaticPermutations },
         { key: "EstimatedVertexFactoryPermutations", label: "Estimated Vertex Factory Permutations", type: "number", axis: true, filter: true,
             value: material => material.EstimatedVertexFactoryPermutations },
+        { key: "ShaderCount", label: "Shader Count (Layout Estimate)", type: "number", axis: true, filter: true,
+            value: material => material.ShaderCount },
+        // The cook columns only have values while a cook stats CSV is loaded.
+        { key: "CookedShaders", label: "Cooked Shaders", type: "number", axis: true, filter: true,
+            value: material => cookedByMaterial.get(material)?.shaders },
+        { key: "CookedShaderMaps", label: "Cooked Shader Maps", type: "number", axis: true, filter: true,
+            value: material => cookedByMaterial.get(material)?.shaderMaps },
+        { key: "BestShaderCount", label: "Shader Count (Cooked, else Estimate)", type: "number", axis: true, filter: true,
+            value: material => cookStats ? cookedByMaterial.get(material)?.shaders ?? material.ShaderCount : undefined },
+        { key: "ShaderCountSource", label: "Shader Count Source", type: "string", filter: true,
+            value: material => cookStats ? shaderCountSource(material) : undefined },
         { key: "TotalUsers", label: "Total Users", type: "number", axis: true, filter: true,
             value: material => hasUsers(material) ? countUsers(material) : undefined },
         { key: "EnabledUsageFlags", label: "Enabled Usage Flags", type: "number", axis: true, filter: true,
@@ -62,6 +78,17 @@
     ];
 
     let materials = [];
+    let reportFileName = "";
+    // The ShaderPlatform object of the loaded report ({ Name, Index }), or null for older reports.
+    let reportShaderPlatform = null;
+    // The loaded cook stats CSV: { fileName, modified, platforms: Map(platform index text -> Map(package path -> cooked shaders)) }.
+    let cookStats = null;
+    // True once the user picks a platform in the menu, so reloading the report keeps that choice.
+    let cookPlatformPickedByUser = false;
+    // Cooked { shaders, shaderMaps } per report material for the chosen platform. Empty without cook stats.
+    let cookedByMaterial = new Map();
+    // How the chosen platform's CSV rows matched the report: { cookedMaterials, outsideRows, outsideShaders, hasInstanceLists }.
+    let cookMatch = null;
     let rows = [];
     let metrics = [];
     let filterColumns = [];
@@ -78,6 +105,21 @@
     fileInput.addEventListener("change", () => {
         if (fileInput.files.length > 0) {
             loadFile(fileInput.files[0]);
+        }
+    });
+
+    chooseCookStatsButton.addEventListener("click", () => cookStatsInput.click());
+
+    cookStatsInput.addEventListener("change", () => {
+        if (cookStatsInput.files.length > 0) {
+            loadCookStatsFile(cookStatsInput.files[0]);
+        }
+    });
+
+    cookPlatformSelect.addEventListener("change", () => {
+        cookPlatformPickedByUser = true;
+        if (materials.length > 0) {
+            showMaterials(materials, reportFileName);
         }
     });
 
@@ -143,8 +185,12 @@
     async function loadFile(file) {
         clearError();
 
+        if (file.name.toLowerCase().endsWith(".csv")) {
+            loadCookStatsFile(file);
+            return;
+        }
         if (!file.name.toLowerCase().endsWith(".json")) {
-            showError("Please choose a Material Analytics JSON file.");
+            showError("Please choose a Material Analytics JSON file or a cook stats CSV.");
             return;
         }
 
@@ -190,25 +236,233 @@
             throw new Error("The local Plotly library could not be loaded.");
         }
 
-        const builtRows = buildRows(report.Materials);
+        reportShaderPlatform = report.ShaderPlatform ?? null;
+        showMaterials(report.Materials, fileName);
+    }
+
+    // Builds the rows, graph menus and filters for reportMaterials, including cooked values when cook stats are loaded.
+    // Throws when the materials do not have two numeric values to plot.
+    function showMaterials(reportMaterials, fileName) {
+        updateCookPlatformSelect();
+        cookMatch = matchCookStats(reportMaterials);
+        const builtRows = buildRows(reportMaterials);
         const availableColumns = columns.filter(column => builtRows.some(row => hasValue(row[column.key])));
         const availableMetrics = availableColumns.filter(column => column.axis);
         if (availableMetrics.length < 2) {
             throw new Error("The report needs at least two numeric values per material to draw a graph.");
         }
 
-        materials = report.Materials;
+        materials = reportMaterials;
+        reportFileName = fileName;
         rows = builtRows;
         metrics = availableMetrics;
         filterColumns = availableColumns.filter(column => column.filter);
         populateAxisSelects();
         const hasFilterColumns = resetFilterConditions();
         fileSummary.textContent = `${fileName} · ${rows.length.toLocaleString()} materials`;
+        renderCookStatsSummary();
         dropZone.classList.add("has-data");
         xAxisSelect.disabled = false;
         yAxisSelect.disabled = false;
         addFilterButton.disabled = !hasFilterColumns;
         renderChart();
+    }
+
+    // Reads a cook's Saved/MaterialStats/Stats-*.csv and applies it to the loaded report, if any.
+    async function loadCookStatsFile(file) {
+        clearError();
+        try {
+            if (!file.name.toLowerCase().endsWith(".csv")) {
+                throw new Error("Please choose a cook stats CSV from Saved/MaterialStats.");
+            }
+            cookStats = {
+                fileName: file.name,
+                modified: new Date(file.lastModified),
+                platforms: parseCookStats(await file.text())
+            };
+            cookPlatformPickedByUser = false;
+            if (materials.length > 0) {
+                showMaterials(materials, reportFileName);
+            } else {
+                updateCookPlatformSelect();
+                renderCookStatsSummary();
+            }
+        } catch (error) {
+            showError(error instanceof Error ? error.message : "The cook stats CSV could not be loaded.");
+        } finally {
+            cookStatsInput.value = "";
+        }
+    }
+
+    // Parses the MaterialStats CSV the engine writes after a cook (Path, Platform, Cooked, ...).
+    // Returns Map(platform index text -> Map(package path -> cooked shader count)).
+    function parseCookStats(text) {
+        const lines = text.split(/\r?\n/).filter(line => line.trim() !== "");
+        const header = parseCsvLine(lines[0] ?? "");
+        const pathIndex = header.indexOf("Path");
+        const platformIndex = header.indexOf("Platform");
+        const cookedIndex = header.indexOf("Cooked");
+        if (pathIndex < 0 || platformIndex < 0 || cookedIndex < 0) {
+            throw new Error("The CSV has no Path, Platform and Cooked columns. Is it a cook's MaterialStats file?");
+        }
+
+        const platforms = new Map();
+        lines.slice(1).forEach(line => {
+            const fields = parseCsvLine(line);
+            const path = fields[pathIndex];
+            const cooked = Number(fields[cookedIndex]);
+            if (!path || !Number.isFinite(cooked)) {
+                return;
+            }
+            const platform = fields[platformIndex];
+            if (!platforms.has(platform)) {
+                platforms.set(platform, new Map());
+            }
+            const cookedByPath = platforms.get(platform);
+            cookedByPath.set(path, (cookedByPath.get(path) ?? 0) + cooked);
+        });
+        if (platforms.size === 0) {
+            throw new Error("The cook stats CSV has no material rows.");
+        }
+        return platforms;
+    }
+
+    // Splits one CSV line into fields, handling quoted fields and doubled quotes inside them.
+    function parseCsvLine(line) {
+        const fields = [];
+        let field = "";
+        let inQuotes = false;
+        for (let index = 0; index < line.length; index += 1) {
+            const character = line[index];
+            if (inQuotes) {
+                if (character === "\"" && line[index + 1] === "\"") {
+                    field += "\"";
+                    index += 1;
+                } else if (character === "\"") {
+                    inQuotes = false;
+                } else {
+                    field += character;
+                }
+            } else if (character === "\"") {
+                inQuotes = true;
+            } else if (character === ",") {
+                fields.push(field);
+                field = "";
+            } else {
+                field += character;
+            }
+        }
+        fields.push(field);
+        return fields;
+    }
+
+    // Fills the platform menu from the cook stats. Keeps the platform already picked; otherwise chooses the report's
+    // own shader platform when the CSV has it. The menu is only shown when the CSV has more than one platform.
+    function updateCookPlatformSelect() {
+        const previous = cookPlatformSelect.value;
+        cookPlatformSelect.replaceChildren();
+        if (!cookStats) {
+            cookPlatformSelect.hidden = true;
+            return;
+        }
+
+        const reportPlatform = reportShaderPlatform ? String(reportShaderPlatform.Index) : null;
+        Array.from(cookStats.platforms.keys())
+            .sort((a, b) => Number(a) - Number(b))
+            .forEach(platform => cookPlatformSelect.add(new Option(cookPlatformLabel(platform), platform)));
+        const platforms = Array.from(cookStats.platforms.keys());
+        if (cookPlatformPickedByUser && platforms.includes(previous)) {
+            cookPlatformSelect.value = previous;
+        } else if (reportPlatform !== null && platforms.includes(reportPlatform)) {
+            cookPlatformSelect.value = reportPlatform;
+        } else if (platforms.includes(previous)) {
+            cookPlatformSelect.value = previous;
+        }
+        cookPlatformSelect.hidden = platforms.length < 2;
+    }
+
+    function cookPlatformLabel(platform) {
+        return reportShaderPlatform && String(reportShaderPlatform.Index) === platform
+            ? `${reportShaderPlatform.Name} (${platform})`
+            : `Shader platform ${platform}`;
+    }
+
+    // Sums the chosen platform's cooked shaders for each material over its master and static permutation instances.
+    // The cook only lists materials that got shaders, so a material without rows was not cooked.
+    function matchCookStats(reportMaterials) {
+        cookedByMaterial = new Map();
+        if (!cookStats) {
+            return null;
+        }
+
+        const cookedByPath = cookStats.platforms.get(cookPlatformSelect.value) ?? new Map();
+        const matchedPaths = new Set();
+        let cookedMaterials = 0;
+        reportMaterials.forEach(material => {
+            const instancePaths = (material.StaticPermutationInstances ?? []).map(path => path.split(".")[0]);
+            const paths = new Set([`${material.PackagePath}/${material.AssetName}`, ...instancePaths]);
+            let shaders = 0;
+            let shaderMaps = 0;
+            paths.forEach(path => {
+                if (cookedByPath.has(path)) {
+                    shaders += cookedByPath.get(path);
+                    shaderMaps += 1;
+                    matchedPaths.add(path);
+                }
+            });
+            cookedByMaterial.set(material, { shaders, shaderMaps });
+            if (shaderMaps > 0) {
+                cookedMaterials += 1;
+            }
+        });
+
+        let outsideRows = 0;
+        let outsideShaders = 0;
+        cookedByPath.forEach((shaders, path) => {
+            if (!matchedPaths.has(path)) {
+                outsideRows += 1;
+                outsideShaders += shaders;
+            }
+        });
+        return {
+            cookedMaterials,
+            outsideRows,
+            outsideShaders,
+            hasInstanceLists: reportMaterials.some(material => Array.isArray(material.StaticPermutationInstances))
+        };
+    }
+
+    function renderCookStatsSummary() {
+        cookStatsSummary.classList.remove("error");
+        if (!cookStats) {
+            cookStatsSummary.textContent = defaultCookStatsSummary;
+            return;
+        }
+
+        const parts = [
+            `Cook stats: ${cookStats.fileName} (${cookStats.modified.toLocaleString()})`,
+            cookPlatformLabel(cookPlatformSelect.value)
+        ];
+        if (!cookMatch) {
+            parts.push("load a report JSON to match it");
+        } else {
+            parts.push(`${cookMatch.cookedMaterials.toLocaleString()} of ${materials.length.toLocaleString()} materials cooked`);
+            parts.push(`${cookMatch.outsideRows.toLocaleString()} cooked materials ` +
+                `(${cookMatch.outsideShaders.toLocaleString()} shaders) are not in the report`);
+            if (!cookMatch.hasInstanceLists) {
+                parts.push("instances could not be matched; generate the report with Shader Permutations enabled");
+                cookStatsSummary.classList.add("error");
+            }
+        }
+        cookStatsSummary.textContent = parts.join(" · ");
+    }
+
+    function shaderCountSource(material) {
+        const cooked = cookedByMaterial.get(material);
+        if (cooked?.shaderMaps > 0) {
+            return "Cooked";
+        }
+        return cooked ? "Not cooked" : "Estimated";
     }
 
     // Builds one row per material with the values of every column, so the graph and filters can read them.
@@ -743,6 +997,21 @@
         if (typeof material.EstimatedVertexFactoryPermutations === "number") {
             addSummaryItem(summary, "Estimated vertex factory permutations",
                 material.EstimatedVertexFactoryPermutations.toLocaleString());
+        }
+        if (typeof material.ShaderCount === "number") {
+            addSummaryItem(summary, "Shader count (layout estimate)", material.ShaderCount.toLocaleString());
+        }
+        const cooked = cookedByMaterial.get(material);
+        if (cooked) {
+            addSummaryItem(summary, "Cooked shaders", cooked.shaderMaps > 0
+                ? `${cooked.shaders.toLocaleString()} in ${cooked.shaderMaps.toLocaleString()} shader maps`
+                : "Not cooked");
+        }
+        const layoutByVertexFactory = Object.entries(material.ShaderCountByVertexFactory ?? {});
+        if (layoutByVertexFactory.length > 0) {
+            addSummaryItem(summary, "Layout shaders by vertex factory", layoutByVertexFactory
+                .map(([vertexFactory, count]) => `${vertexFactory} ${count.toLocaleString()}`)
+                .join(" · "));
         }
         detailsPanel.append(title, path, summary);
 

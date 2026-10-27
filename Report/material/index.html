@@ -24,6 +24,31 @@
         });
     </script>
     <style>
+        .header-actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        .header-actions select {
+            padding: 9px 12px;
+            border: 1px solid #46505b;
+            border-radius: 7px;
+            background: #20262d;
+            color: #f3f5f7;
+            font: inherit;
+        }
+
+        .header-actions select[hidden] {
+            display: none;
+        }
+
+        #cook-stats-summary.error {
+            color: #ff9a9a;
+        }
+
         .material-details {
             margin-top: 26px;
             padding: 20px 22px;
@@ -141,9 +166,15 @@
             <div>
                 <h1>Material Analytics</h1>
                 <p id="file-summary">Choose or drop a Material Analytics JSON file to begin.</p>
+                <p id="cook-stats-summary">Optional: load a cook's Saved/MaterialStats CSV to show real cooked shader counts.</p>
             </div>
-            <button id="choose-file" class="file-button" type="button">Choose JSON</button>
+            <div class="header-actions">
+                <select id="cook-platform" aria-label="Cook stats shader platform" hidden></select>
+                <button id="choose-cook-stats" class="file-button" type="button">Load Cook Stats</button>
+                <button id="choose-file" class="file-button" type="button">Choose JSON</button>
+            </div>
             <input id="json-file" type="file" accept=".json,application/json" hidden>
+            <input id="cook-stats-file" type="file" accept=".csv,text/csv" hidden>
         </header>
 
         <section class="filter-panel" aria-labelledby="filter-title">
@@ -161,9 +192,9 @@
             <div id="chart" aria-live="polite"></div>
             <div id="empty-state">
                 <strong>Drop your JSON file here</strong>
-                <span>or use Choose JSON above</span>
+                <span>or use Choose JSON above. A cook stats CSV can be dropped too.</span>
             </div>
-            <div id="drop-overlay" aria-hidden="true">Drop JSON to load</div>
+            <div id="drop-overlay" aria-hidden="true">Drop JSON or cook stats CSV to load</div>
         </section>
 
         <section class="asset-action" aria-label="Selected graph material">

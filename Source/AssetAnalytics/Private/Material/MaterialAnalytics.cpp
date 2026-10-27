@@ -39,6 +39,7 @@
 #include "MaterialCachedData.h"
 #include "MaterialShaderQualitySettings.h"
 #include "MaterialShared.h"
+#include "DataDrivenShaderPlatformInfo.h"
 #include "RHIShaderPlatform.h"
 #include "SceneTypes.h"
 #include "ShaderPlatformQualitySettings.h"
@@ -1469,6 +1470,11 @@ namespace Material
 			const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
 				TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
 			Writer->WriteObjectStart();
+			// The shader platform the counts are for. Index matches the Platform column of a cook's MaterialStats CSV.
+			Writer->WriteObjectStart(TEXT("ShaderPlatform"));
+			Writer->WriteValue(TEXT("Name"), FDataDrivenShaderPlatformInfo::GetName(GMaxRHIShaderPlatform).ToString());
+			Writer->WriteValue(TEXT("Index"), static_cast<int32>(GMaxRHIShaderPlatform));
+			Writer->WriteObjectEnd();
 			Writer->WriteArrayStart(TEXT("Materials"));
 			for (const FMaterialAssetData& Item : AssetItems)
 			{
