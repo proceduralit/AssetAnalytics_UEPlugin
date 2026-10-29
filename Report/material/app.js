@@ -31,7 +31,7 @@
     };
 
     // Every value offered in the graph menus. "axis" adds it to the X/Y menus, "filter" to the filter menu.
-    // Types: "number", "string" (pick from values), or "list" (a material matches if any of its values is picked).
+    // Types: "number" or "string" (pick from values).
     // A column is hidden when no material in the file has a value for it.
     const columns = [
         { key: "PackageDiskSize", label: "Package Disk Size (bytes)", type: "number", axis: true, filter: true,
@@ -49,24 +49,12 @@
             value: material => cookStats ? shaderCountSource(material) : undefined },
         { key: "TotalUsers", label: "Total Users", type: "number", axis: true, filter: true,
             value: material => hasUsers(material) ? countUsers(material) : undefined },
-        { key: "EnabledUsageFlags", label: "Enabled Usage Flags", type: "number", axis: true, filter: true,
+        { key: "EnabledUsageFlags", label: "Enabled Usage Flags", type: "number", axis: true,
             value: material => material.UsageFlagsRead ? summarizeUsage(material).enabledCount : undefined },
-        { key: "UsedNotEnabledFlags", label: "Used but Not Enabled Flags", type: "number", axis: true, filter: true,
-            value: material => material.UsageFlagsRead ? summarizeUsage(material).usedNotEnabledCount : undefined },
-        { key: "EnabledUnusedFlags", label: "Enabled but Unused Flags", type: "number", axis: true, filter: true,
+        { key: "EnabledUnusedFlags", label: "Enabled but Unused Flags", type: "number", axis: true,
             value: material => material.UsageFlagsRead ? summarizeUsage(material).enabledUnusedCount : undefined },
-        { key: "UsesQualitySwitch", label: "Uses Quality Switch", type: "string", filter: true,
-            value: material => Array.isArray(material.QualityLevelsUsed)
-                ? (material.QualityLevelsUsed.length > 0 ? "Yes" : "No")
-                : undefined },
-        { key: "UsageStatus", label: "Usage Status", type: "string", filter: true,
-            value: material => summarizeUsage(material).status.label },
         { key: "PackagePath", label: "Package Path", type: "string", filter: true,
-            value: material => material.PackagePath },
-        { key: "UsedByVertexFactory", label: "Used by Vertex Factory", type: "list", filter: true,
-            value: material => vertexFactoryNames(material, entry => entry.Users?.length > 0) },
-        { key: "EnabledUsageFlag", label: "Usage Flag Enabled", type: "list", filter: true,
-            value: material => vertexFactoryNames(material, entry => entry.Enabled === true) }
+            value: material => material.PackagePath }
     ];
 
     let materials = [];
@@ -458,7 +446,7 @@
     }
 
     // Builds one row per material with the values of every column, so the graph and filters can read them.
-    // Numbers and strings are stored as text like the mesh report; list columns keep an array of names.
+    // Numbers and strings are stored as text like the mesh report.
     function buildRows(reportMaterials) {
         return reportMaterials.map((material, materialIndex) => {
             const row = {
@@ -467,18 +455,14 @@
             };
             columns.forEach(column => {
                 const value = column.value(material);
-                if (column.type === "list") {
-                    row[column.key] = value ?? [];
-                } else {
-                    row[column.key] = value === undefined || value === null ? "" : String(value);
-                }
+                row[column.key] = value === undefined || value === null ? "" : String(value);
             });
             return row;
         });
     }
 
     function hasValue(value) {
-        return Array.isArray(value) ? value.length > 0 : value !== undefined && value.trim() !== "";
+        return value !== undefined && value.trim() !== "";
     }
 
     function hasUsers(material) {
@@ -488,13 +472,6 @@
     function countUsers(material) {
         return Object.values(material.VertexFactories ?? {})
             .reduce((total, entry) => total + (entry.Users?.length ?? 0), 0);
-    }
-
-    // Returns the readable names of the VertexFactories entries that pass isIncluded.
-    function vertexFactoryNames(material, isIncluded) {
-        return Object.entries(material.VertexFactories ?? {})
-            .filter(([, entry]) => isIncluded(entry))
-            .map(([key]) => splitHeader(key));
     }
 
     // Returns the status of one VertexFactories entry, or null when it has no usage flag to compare.
@@ -561,7 +538,7 @@
             yAxisSelect.add(new Option(metric.label, metric.key));
         });
 
-        xAxisSelect.value = chooseMetric(previousX, "InstanceCount", 0);
+        xAxisSelect.value = chooseMetric(previousX, "PackageDiskSize", 0);
         yAxisSelect.value = chooseMetric(previousY, "TotalUsers", Math.min(1, metrics.length - 1));
 
         if (xAxisSelect.value === yAxisSelect.value && metrics.length > 1) {
@@ -594,9 +571,7 @@
         const columnSelect = document.createElement("select");
         columnSelect.setAttribute("aria-label", `Filter condition ${conditionId} column`);
         filterColumns.forEach(column => columnSelect.add(new Option(column.label, column.key)));
-        columnSelect.value = filterColumns.some(column => column.key === "UsageStatus")
-            ? "UsageStatus"
-            : filterColumns[0].key;
+        columnSelect.value = filterColumns[0].key;
 
         const operatorSelect = document.createElement("select");
         operatorSelect.setAttribute("aria-label", `Filter condition ${conditionId} comparison`);
@@ -645,8 +620,6 @@
             condition.operatorSelect.value = ["lt", "eq", "gt"].includes(previousOperator)
                 ? previousOperator
                 : "gt";
-        } else if (column.type === "list") {
-            condition.operatorSelect.add(new Option("Includes any of", "any"));
         } else {
             condition.operatorSelect.add(new Option("Equal to (=)", "eq"));
         }
@@ -667,7 +640,7 @@
             valueEditor = createStringValueMenu(condition, column);
         }
         valueEditor.setAttribute("aria-label", `Filter condition ${condition.conditionId} value`);
-        if (column.type !== "string" && column.type !== "list") {
+        if (column.type !== "string") {
             valueEditor.addEventListener("change", renderChart);
         }
         condition.valueInput.replaceWith(valueEditor);
@@ -677,12 +650,10 @@
     function createStringValueMenu(condition, column) {
         const valueCounts = new Map();
         rows.forEach(row => {
-            const rowValues = column.type === "list" ? row[column.key] : [row[column.key].trim()];
-            rowValues.forEach(value => {
-                if (value !== "") {
-                    valueCounts.set(value, (valueCounts.get(value) ?? 0) + 1);
-                }
-            });
+            const value = row[column.key].trim();
+            if (value !== "") {
+                valueCounts.set(value, (valueCounts.get(value) ?? 0) + 1);
+            }
         });
 
         const menu = document.createElement("details");
@@ -953,7 +924,6 @@
         const summary = document.createElement("div");
         summary.className = "details-summary";
         const usage = summarizeUsage(material);
-        addSummaryItem(summary, "Usage", usage.status.label);
         if (typeof material.PackageDiskSize === "number") {
             addSummaryItem(summary, "Disk size", formatBytes(material.PackageDiskSize));
         }
@@ -963,29 +933,6 @@
         if (material.UsageFlagsRead === true) {
             addSummaryItem(summary, "Enabled usage flags", usage.enabledCount.toLocaleString());
         }
-        if (typeof material.ShaderMapCount === "number") {
-            addSummaryItem(summary, "Shader maps, counting duplicate instances", material.ShaderMapCount.toLocaleString());
-        }
-        if (typeof material.UniqueStaticPermutations === "number") {
-            addSummaryItem(summary, "Unique static permutations", material.UniqueStaticPermutations.toLocaleString());
-        }
-        const reasons = material.StaticPermutationReasons;
-        if (reasons) {
-            const reasonText = [
-                ["Static switches", reasons.StaticSwitches],
-                ["Material layers", reasons.MaterialLayers],
-                ["Base properties", reasons.BaseProperties],
-                ["Other", reasons.Other]
-            ].filter(([, count]) => count > 0)
-                .map(([label, count]) => `${label} ${count.toLocaleString()}`)
-                .join(" · ");
-            addSummaryItem(summary, "Own shader map because of", reasonText || "None");
-        }
-        if (Array.isArray(material.QualityLevelsUsed)) {
-            addSummaryItem(summary, "Quality levels used", material.QualityLevelsUsed.length > 0
-                ? material.QualityLevelsUsed.join(", ")
-                : "None (no Quality Switch)");
-        }
         if (typeof material.ShaderCount === "number") {
             addSummaryItem(summary, "Shader count (layout estimate)", material.ShaderCount.toLocaleString());
         }
@@ -994,12 +941,6 @@
             addSummaryItem(summary, "Cooked shaders", cooked.shaderMaps > 0
                 ? `${cooked.shaders.toLocaleString()} in ${cooked.shaderMaps.toLocaleString()} shader maps`
                 : "Not cooked");
-        }
-        const layoutByVertexFactory = Object.entries(material.ShaderCountByVertexFactory ?? {});
-        if (layoutByVertexFactory.length > 0) {
-            addSummaryItem(summary, "Layout shaders by vertex factory", layoutByVertexFactory
-                .map(([vertexFactory, count]) => `${vertexFactory} ${count.toLocaleString()}`)
-                .join(" · "));
         }
         detailsPanel.append(title, path, summary);
 
@@ -1249,7 +1190,7 @@
                 continue;
             }
 
-            if (column.type === "string" || column.type === "list") {
+            if (column.type === "string") {
                 if (condition.selectedValues.size > 0) {
                     activeFilters.push({
                         column: condition.columnSelect.value,
@@ -1286,9 +1227,6 @@
     }
 
     function matchesFilter(row, filter) {
-        if (filter.type === "list") {
-            return row[filter.column].some(value => filter.value.has(value));
-        }
         const rawRowValue = row[filter.column];
         if (rawRowValue === undefined || rawRowValue.trim() === "") {
             return false;

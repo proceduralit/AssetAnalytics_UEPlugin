@@ -8,7 +8,7 @@ Editor-only plugin (all modules are `Type: Editor` in the .uplugin). It never sh
 - Engine: `D:/Gamedev/UE_5.8`
 - Host project: the `.uproject` two folders above this file (`../../*.uproject`).
   This plugin lives in that project's `Plugins/` folder.
-- Build: `<exact RunUAT/Build.bat command>`
+- Build: `"D:/Gamedev/UE_5.8/Engine/Build/BatchFiles/Build.bat" CitySampleEditor Win64 Development -Project="D:/Mohsen/Playground/CitySample/CitySample.uproject" -WaitMutex -NoHotReloadFromIDE`
 - After C++ changes, build and fix errors before finishing. If building isn't possible, verify edits didn't alter declarations, macros, includes, or signatures.
 
 ## Scope

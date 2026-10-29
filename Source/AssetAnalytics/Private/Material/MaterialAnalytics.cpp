@@ -185,60 +185,15 @@ namespace Material
 		/** Counted instances that compile their own shader map, sorted. */
 		TArray<FString> StaticPermutationInstancePaths;
 
-		/** Quality levels the master's Quality Switch nodes give their own shader map. */
-		TArray<FString> QualityLevelsUsed;
-
-		/** Shader maps of the master and its static permutation instances, including quality levels. */
-		int32 ShaderMapCount = INDEX_NONE;
-
 		/** Shaders the master and one instance per unique static permutation compile, from the engine's shader map layout. */
 		int32 LayoutShaderCount = INDEX_NONE;
-
-		/** LayoutShaderCount split by vertex factory name, or "None" for shaders without one. */
-		TMap<FString, int32> LayoutShadersByVertexFactory;
 
 		/** Static switches of the master, with how many counted instances change them. */
 		TArray<FStaticSwitchSummary> StaticSwitches;
 
-		/** Static permutation instances whose chain overrides static switches, layers or base properties, or none of them. */
-		int32 SwitchPermutationCount = 0;
-		int32 LayerPermutationCount = 0;
-		int32 BasePropertyPermutationCount = 0;
-		int32 OtherPermutationCount = 0;
-
 		/** Distinct combinations of static parameters and base property overrides among the static permutation instances. */
 		int32 UniqueStaticPermutationCount = 0;
 	};
-
-	/** What an instance and its parent instances override, which explains why it compiles its own shader map. */
-	struct FStaticPermutationReasons
-	{
-		bool bStaticSwitches = false;
-		bool bMaterialLayers = false;
-		bool bBaseProperties = false;
-	};
-
-	/**
-	 * Collects the overrides of Instance and its parent instances, because a child inherits its parents'
-	 * static overrides and so compiles its own shader map even when it sets nothing itself.
-	 */
-	static FStaticPermutationReasons FindStaticPermutationReasons(const UMaterialInstance& Instance)
-	{
-		FStaticPermutationReasons Reasons;
-		Reasons.bBaseProperties = Instance.HasOverridenBaseProperties();
-		for (const UMaterialInstance* ChainInstance = &Instance;
-			ChainInstance != nullptr;
-			ChainInstance = Cast<UMaterialInstance>(ChainInstance->Parent))
-		{
-			const FStaticParameterSet OwnStaticParameters = ChainInstance->GetStaticParameters();
-			if (OwnStaticParameters.bHasMaterialLayers) Reasons.bMaterialLayers = true;
-			for (const FStaticSwitchParameter& SwitchParameter : OwnStaticParameters.StaticSwitchParameters)
-			{
-				if (SwitchParameter.bOverride) Reasons.bStaticSwitches = true;
-			}
-		}
-		return Reasons;
-	}
 
 	/** Effective static parameters and base property overrides of one static permutation instance, used to group equal ones. */
 	struct FStaticPermutationKey
@@ -247,31 +202,21 @@ namespace Material
 		uint64 BasePropertyOverridesHash = 0;
 	};
 
-	/** Quality levels that compile their own shader map for one material, and the shader map count they produce. */
-	struct FQualityShaderMaps
-	{
-		/** Quality levels whose Quality Switch inputs differ, or that a platform quality override forces. */
-		TArray<EMaterialQualityLevel::Type> UsedLevels;
-
-		/** One shader map per used level, plus one default shader map for the levels that are not used. */
-		int32 ShaderMapCount = 1;
-	};
-
 	/**
-	 * Finds how many shader maps Material compiles across quality levels on ShaderPlatform when cooking.
+	 * Counts the shader maps Material compiles across quality levels on ShaderPlatform when cooking: one per quality
+	 * level whose Quality Switch inputs differ or that a platform quality override forces, plus one default.
 	 * It repeats UMaterialInterface::GetQualityLevelUsage (not exported from the Engine module) and
 	 * UMaterial::GetNewResources: each used quality level gets its own shader map, and the unused levels share a
 	 * default one unless the platform discards them when cooking.
 	 */
-	static FQualityShaderMaps GetQualityShaderMaps(const UMaterialInterface& Material, const EShaderPlatform ShaderPlatform)
+	static int32 CountQualityShaderMaps(const UMaterialInterface& Material, const EShaderPlatform ShaderPlatform)
 	{
 		// Quality levels whose Quality Switch inputs differ, including switches inside material functions.
 		const TArray<bool>& SwitchQualityLevelsUsed = Material.GetCachedExpressionData().QualityLevelsUsed;
 		const UShaderPlatformQualitySettings* QualitySettings =
 			UMaterialShaderQualitySettings::Get()->GetShaderPlatformQualitySettings(ShaderPlatform);
 
-		FQualityShaderMaps Result;
-		Result.ShaderMapCount = 0;
+		int32 ShaderMapCount = 0;
 		bool bNeedsDefaultShaderMap = false;
 		for (int32 QualityIndex = 0; QualityIndex < EMaterialQualityLevel::Num; ++QualityIndex)
 		{
@@ -297,20 +242,16 @@ namespace Material
 
 			if (bQualityLevelUsed)
 			{
-				Result.UsedLevels.Add(QualityLevel);
-				++Result.ShaderMapCount;
+				++ShaderMapCount;
 			}
 			else if (!bDiscardedWhenCooking)
 			{
 				bNeedsDefaultShaderMap = true;
 			}
 		}
-		if (bNeedsDefaultShaderMap) ++Result.ShaderMapCount;
-		return Result;
+		if (bNeedsDefaultShaderMap) ++ShaderMapCount;
+		return ShaderMapCount;
 	}
-
-	/** Breakdown key for material shaders that do not belong to a vertex factory. */
-	static const TCHAR* NoVertexFactoryName = TEXT("None");
 
 	/**
 	 * Counts the shaders Material's shader maps compile on ShaderPlatform, from the engine's shader map layout.
@@ -320,14 +261,13 @@ namespace Material
 	 * A master covers all its quality shader maps; an instance only covers its active quality level.
 	 * Inputs: CookedPlatform selects the cooked game's shader permutations (nullptr uses the editor's, which adds
 	 * editor-only shaders). Multiplier repeats the count, for instance quality shader maps the layout does not cover.
-	 * Output: adds each vertex factory's shaders to InOutShadersByVertexFactory and returns the shader count.
+	 * Returns: The shader count.
 	 */
 	static int32 CountLayoutShaders(
 		UMaterialInterface& Material,
 		const EShaderPlatform ShaderPlatform,
 		const ITargetPlatform* CookedPlatform,
-		const int32 Multiplier,
-		TMap<FString, int32>& InOutShadersByVertexFactory)
+		const int32 Multiplier)
 	{
 		TArray<FDebugShaderTypeInfo> ShaderInfos;
 		Material.GetShaderTypes(ShaderPlatform, CookedPlatform, ShaderInfos);
@@ -335,14 +275,11 @@ namespace Material
 		int32 ShaderCount = 0;
 		for (const FDebugShaderTypeInfo& ShaderInfo : ShaderInfos)
 		{
-			int32 VertexFactoryShaderCount = ShaderInfo.ShaderTypes.Num();
+			ShaderCount += ShaderInfo.ShaderTypes.Num();
 			for (const FDebugShaderPipelineInfo& PipelineInfo : ShaderInfo.Pipelines)
 			{
-				VertexFactoryShaderCount += PipelineInfo.ShaderTypes.Num();
+				ShaderCount += PipelineInfo.ShaderTypes.Num();
 			}
-			const FString VertexFactoryName = ShaderInfo.VFType != nullptr ? ShaderInfo.VFType->GetName() : NoVertexFactoryName;
-			InOutShadersByVertexFactory.FindOrAdd(VertexFactoryName) += VertexFactoryShaderCount * Multiplier;
-			ShaderCount += VertexFactoryShaderCount;
 		}
 		return ShaderCount * Multiplier;
 	}
@@ -896,15 +833,9 @@ namespace Material
 			if (!bWasMasterLoaded) ++LoadedAssetCount;
 
 			const EShaderPlatform ShaderPlatform = GMaxRHIShaderPlatform;
-			const FQualityShaderMaps MasterQuality = GetQualityShaderMaps(*MasterMaterial, ShaderPlatform);
-			for (const EMaterialQualityLevel::Type QualityLevel : MasterQuality.UsedLevels)
-			{
-				Item.QualityLevelsUsed.Add(LexToString(QualityLevel));
-			}
-			int32 ShaderMapCount = MasterQuality.ShaderMapCount;
 			// The cooked game for the editor's own OS, such as Windows, so editor-only shaders are left out of the layout.
 			const ITargetPlatform* CookedPlatform = GetTargetPlatformManagerRef().FindTargetPlatform(FPlatformProperties::IniPlatformName());
-			int32 LayoutShaderCount = CountLayoutShaders(*MasterMaterial, ShaderPlatform, CookedPlatform, 1, Item.LayoutShadersByVertexFactory);
+			int32 LayoutShaderCount = CountLayoutShaders(*MasterMaterial, ShaderPlatform, CookedPlatform, 1);
 
 			TArray<FMaterialParameterInfo> SwitchInfos;
 			TArray<FGuid> SwitchGuids;
@@ -947,15 +878,6 @@ namespace Material
 				if (!Instance->bHasStaticPermutationResource) continue;
 
 				Item.StaticPermutationInstancePaths.Add(InstanceData.GetObjectPathString());
-				const int32 InstanceShaderMapCount = GetQualityShaderMaps(*Instance, ShaderPlatform).ShaderMapCount;
-				ShaderMapCount += InstanceShaderMapCount;
-
-				const FStaticPermutationReasons Reasons = FindStaticPermutationReasons(*Instance);
-				if (Reasons.bStaticSwitches) ++Item.SwitchPermutationCount;
-				if (Reasons.bMaterialLayers) ++Item.LayerPermutationCount;
-				if (Reasons.bBaseProperties) ++Item.BasePropertyPermutationCount;
-				if (!Reasons.bStaticSwitches && !Reasons.bMaterialLayers && !Reasons.bBaseProperties) ++Item.OtherPermutationCount;
-
 				// Instances with equal effective static parameters and base property overrides compile the same shaders.
 				FStaticPermutationKey Key;
 				Instance->GetStaticParameterValues(Key.StaticParameters);
@@ -972,13 +894,13 @@ namespace Material
 					// GetShaderTypes asserts that static permutation instances are constant instances.
 					if (Instance->IsA<UMaterialInstanceConstant>())
 					{
-						LayoutShaderCount += CountLayoutShaders(*Instance, ShaderPlatform, CookedPlatform, InstanceShaderMapCount, Item.LayoutShadersByVertexFactory);
+						const int32 InstanceShaderMapCount = CountQualityShaderMaps(*Instance, ShaderPlatform);
+						LayoutShaderCount += CountLayoutShaders(*Instance, ShaderPlatform, CookedPlatform, InstanceShaderMapCount);
 					}
 				}
 			}
 			Item.UniqueStaticPermutationCount = PermutationKeys.Num();
 			Item.StaticPermutationInstancePaths.Sort();
-			Item.ShaderMapCount = ShaderMapCount;
 			Item.LayoutShaderCount = LayoutShaderCount;
 			Item.bShaderPermutationsRead = true;
 			return LoadedAssetCount;
@@ -1336,38 +1258,10 @@ namespace Material
 			}
 			if (Item.bShaderPermutationsRead)
 			{
-				const int32 ShaderMapCount = Item.ShaderMapCount;
-				Writer.WriteValue(TEXT("ShaderMapCount"), ShaderMapCount);
-				Writer.WriteArrayStart(TEXT("QualityLevelsUsed"));
-				for (const FString& QualityLevel : Item.QualityLevelsUsed)
-				{
-					Writer.WriteValue(QualityLevel);
-				}
-				Writer.WriteArrayEnd();
-				// An instance can have several reasons, so these counts can add up to more than the static permutation instances.
-				Writer.WriteObjectStart(TEXT("StaticPermutationReasons"));
-				Writer.WriteValue(TEXT("StaticSwitches"), Item.SwitchPermutationCount);
-				Writer.WriteValue(TEXT("MaterialLayers"), Item.LayerPermutationCount);
-				Writer.WriteValue(TEXT("BaseProperties"), Item.BasePropertyPermutationCount);
-				Writer.WriteValue(TEXT("Other"), Item.OtherPermutationCount);
-				Writer.WriteObjectEnd();
 				Writer.WriteValue(TEXT("UniqueStaticPermutations"), Item.UniqueStaticPermutationCount);
-				// Writes a vertex factory breakdown as {Name: ShaderCount}, largest first.
-				auto WriteShadersByVertexFactory = [&Writer](const TCHAR* FieldName, TMap<FString, int32> ShadersByVertexFactory)
-				{
-					ShadersByVertexFactory.ValueSort(TGreater<int32>());
-					Writer.WriteObjectStart(FieldName);
-					for (const TPair<FString, int32>& VertexFactoryShaders : ShadersByVertexFactory)
-					{
-						Writer.WriteValue(VertexFactoryShaders.Key, VertexFactoryShaders.Value);
-					}
-					Writer.WriteObjectEnd();
-				};
-
 				// Shaders of the master and one instance per unique static permutation, on the editor's shader platform
 				// with the cooked game's permutations.
 				Writer.WriteValue(TEXT("ShaderCount"), Item.LayoutShaderCount);
-				WriteShadersByVertexFactory(TEXT("ShaderCountByVertexFactory"), Item.LayoutShadersByVertexFactory);
 
 				// ChangedCount: counted instances overriding the switch with the value opposite to its default.
 				Writer.WriteArrayStart(TEXT("StaticSwitches"));
