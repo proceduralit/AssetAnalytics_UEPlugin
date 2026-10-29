@@ -6,13 +6,13 @@
     <title>Material Analytics Report</title>
     <link id="report-stylesheet" rel="stylesheet" href="../core/styles.css">
     <script>
-        if (window.location.protocol === "http:" || window.location.protocol === "https:") {
+        // The editor serves the report over HTTP; opened as a file, the page loads its files from disk.
+        const isEditorServed = window.location.protocol === "http:" || window.location.protocol === "https:";
+        if (isEditorServed) {
             document.getElementById("report-stylesheet").href = "styles";
         }
 
         window.addEventListener("DOMContentLoaded", () => {
-            const isEditorServed = window.location.protocol === "http:" ||
-                window.location.protocol === "https:";
             const plotlyScript = document.createElement("script");
             plotlyScript.src = isEditorServed ? "plotly" : "../core/plotly-basic-3.7.0.min.js";
             plotlyScript.addEventListener("load", () => {
@@ -41,10 +41,6 @@
             font: inherit;
         }
 
-        .header-actions select[hidden] {
-            display: none;
-        }
-
         #cook-stats-summary.error {
             color: #ff9a9a;
         }
@@ -55,10 +51,6 @@
             border: 1px solid #323a43;
             border-radius: 10px;
             background: #171b20;
-        }
-
-        .material-details[hidden] {
-            display: none;
         }
 
         .material-details h2 {
@@ -93,21 +85,21 @@
             font-weight: 500;
         }
 
-        .vertex-factory-table {
+        .details-table {
             width: 100%;
             border-collapse: collapse;
             font-size: 14px;
         }
 
-        .vertex-factory-table th,
-        .vertex-factory-table td {
+        .details-table th,
+        .details-table td {
             padding: 8px 10px;
             border-bottom: 1px solid #2a323b;
             text-align: left;
             vertical-align: top;
         }
 
-        .vertex-factory-table th {
+        .details-table th {
             color: #9ba4ae;
             font-weight: 500;
         }

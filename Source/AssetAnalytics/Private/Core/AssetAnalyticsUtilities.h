@@ -53,6 +53,14 @@ namespace Core
 		return true;
 	}
 
+	/** Returns whether PackageName is inside the project's Developers folder. */
+	inline bool IsDeveloperPackage(const FName PackageName)
+	{
+		const FString PackagePath = PackageName.ToString();
+		return PackagePath.Equals(TEXT("/Game/Developers"), ESearchCase::IgnoreCase) ||
+			PackagePath.StartsWith(TEXT("/Game/Developers/"), ESearchCase::IgnoreCase);
+	}
+
 	/** Returns whether AssetData has a game reference, optionally ignoring the Developers folder. */
 	inline bool HasRelevantReferencer(
 		IAssetRegistry& AssetRegistry,
@@ -69,11 +77,7 @@ namespace Core
 
 		for (const FName Referencer : GameReferencers)
 		{
-			const FString ReferencerPath = Referencer.ToString();
-			const bool bIsDeveloperAsset =
-				ReferencerPath.Equals(TEXT("/Game/Developers"), ESearchCase::IgnoreCase) ||
-				ReferencerPath.StartsWith(TEXT("/Game/Developers/"), ESearchCase::IgnoreCase);
-			if (!bIsDeveloperAsset) return true;
+			if (!IsDeveloperPackage(Referencer)) return true;
 		}
 		return false;
 	}

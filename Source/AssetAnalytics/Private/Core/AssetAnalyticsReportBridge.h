@@ -13,7 +13,7 @@ namespace AssetAnalytics
 namespace Core
 {
 	/** Returns the local URL for the Mesh Analytics report. */
-	FString GetAssetAnalyticsReportUrl();
+	FString GetMeshAnalyticsReportUrl();
 
 	/** Returns the local URL for the Material Analytics report. */
 	FString GetMaterialAnalyticsReportUrl();

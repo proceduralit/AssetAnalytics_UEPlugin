@@ -137,6 +137,7 @@ namespace Material
 	/** A classified asset that references a material or one of its instances. */
 	struct FMaterialUser
 	{
+		/** Kind of asset or actor that uses the material. */
 		EMaterialUserType Type = EMaterialUserType::Other;
 
 		/** Object path shown in the report, or the package name when the package has no registry asset. */
@@ -156,6 +157,7 @@ namespace Material
 		int32 ChangedCount = 0;
 	};
 
+	/** Everything the report gathers for one master material. */
 	struct FMaterialAssetData
 	{
 		/** Creates an empty report row for InAssetData. */
@@ -164,7 +166,10 @@ namespace Material
 		{
 		}
 
+		/** Registry entry of the master material. */
 		FAssetData AssetData;
+
+		/** Size of the master's package on disk in bytes, or -1 when unknown. */
 		int64 PackageDiskSize = -1;
 
 		/** Counted instances below the material, including instances of instances. */
@@ -198,7 +203,10 @@ namespace Material
 	/** Effective static parameters and base property overrides of one static permutation instance, used to group equal ones. */
 	struct FStaticPermutationKey
 	{
+		/** Static parameters the instance ends up with, including those inherited from parent instances. */
 		FStaticParameterSet StaticParameters;
+
+		/** Hash of the instance's base property overrides, such as blend mode or two sided. */
 		uint64 BasePropertyOverridesHash = 0;
 	};
 
@@ -316,7 +324,8 @@ namespace Material
 
 	/**
 	 * Decides which kind of asset a referencing package holds, using only registry data.
-	 * Input: ReferencerPackage is a package that references a material or material instance.
+	 * Inputs: ReferencerPackage is a package that references a material or material instance, and PackageAssets
+	 * are the registry assets in that package.
 	 * Returns: The matching user type, or Other when no rule matches.
 	 */
 	static EMaterialUserType ClassifyReferencer(
@@ -549,14 +558,7 @@ namespace Material
 		return Uses;
 	}
 
-	/** Returns whether PackageName is inside the project's Developers folder. */
-	static bool IsDeveloperPackage(const FName PackageName)
-	{
-		const FString PackagePath = PackageName.ToString();
-		return PackagePath.Equals(TEXT("/Game/Developers"), ESearchCase::IgnoreCase) ||
-			PackagePath.StartsWith(TEXT("/Game/Developers/"), ESearchCase::IgnoreCase);
-	}
-
+	/** Gathers the Material Analytics report over several editor ticks and saves it when done. */
 	class FMaterialAnalyticsRunner
 	{
 	public:
@@ -581,14 +583,7 @@ namespace Material
 		/** Stops gathering and throws away unfinished results. */
 		void Stop()
 		{
-			if (TickerHandle.IsValid())
-			{
-				FTSTicker::RemoveTicker(TickerHandle);
-				TickerHandle.Reset();
-			}
-			TrackUnfinishedBatch();
-			ResetReportData();
-			PackageUnloader.UnloadReportPackages();
+			AbortRun();
 			ProgressNotification.Dismiss();
 		}
 
@@ -646,8 +641,8 @@ namespace Material
 			if (MaterialsInBatch > 0 && BatchLoadedAssetCount > 0) PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
 		}
 
-		/** Cancels gathering, clears unfinished results, and updates the notification. */
-		void Cancel()
+		/** Stops ticking, throws away unfinished results, and unloads the packages the run loaded. */
+		void AbortRun()
 		{
 			if (TickerHandle.IsValid())
 			{
@@ -657,6 +652,12 @@ namespace Material
 			TrackUnfinishedBatch();
 			ResetReportData();
 			PackageUnloader.UnloadReportPackages();
+		}
+
+		/** Cancels gathering, clears unfinished results, and updates the notification. */
+		void Cancel()
+		{
+			AbortRun();
 			ProgressNotification.Finish(
 				LOCTEXT("MaterialAnalyticsCancelled", "Material Analytics gathering cancelled."),
 				SNotificationItem::CS_None);
@@ -743,7 +744,7 @@ namespace Material
 				for (const FName Referencer : Referencers)
 				{
 					if (InstancePackages.Contains(Referencer)) continue;
-					if (Settings.bIgnoreDeveloperReferences && IsDeveloperPackage(Referencer)) continue;
+					if (Settings.bIgnoreDeveloperReferences && Core::IsDeveloperPackage(Referencer)) continue;
 					UserPackages.Add(Referencer);
 				}
 			}
@@ -813,11 +814,12 @@ namespace Material
 		}
 
 		/**
-		 * Loads a master and its counted instances to count their shader maps on the editor's shader platform.
-		 * Instances that override static parameters or base properties compile their own shader maps; instances
-		 * with identical overrides are still counted separately, although they may share cached shaders.
-		 * Each of these materials compiles one shader map per quality level used by a Quality Switch, plus a default.
-		 * Output: Fills the shader map fields of Item and sets Item.bShaderPermutationsRead.
+		 * Loads a master and its counted instances to read their static permutations on the editor's shader platform.
+		 * Instances that override static parameters or base properties compile their own shader map. Instances with
+		 * equal effective overrides compile the same shaders, so the layout shader count is taken once per unique
+		 * permutation, repeated for each of that instance's quality shader maps.
+		 * Output: Fills Item.StaticSwitches, StaticPermutationInstancePaths, UniqueStaticPermutationCount and
+		 * LayoutShaderCount, and sets Item.bShaderPermutationsRead.
 		 * Returns: The number of materials loaded from disk.
 		 */
 		static int32 ReadStaticPermutations(const FAssetData& MasterData, FMaterialAssetData& Item)
@@ -827,7 +829,7 @@ namespace Material
 			UMaterial* MasterMaterial = Cast<UMaterial>(MasterData.GetAsset());
 			if (MasterMaterial == nullptr)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material %s to count its shader maps."), *MasterData.GetObjectPathString());
+				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material %s to read its static permutations."), *MasterData.GetObjectPathString());
 				return LoadedAssetCount;
 			}
 			if (!bWasMasterLoaded) ++LoadedAssetCount;
@@ -858,7 +860,7 @@ namespace Material
 				UMaterialInstance* Instance = Cast<UMaterialInstance>(InstanceData.GetAsset());
 				if (Instance == nullptr)
 				{
-					UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material instance %s to check its shader map."), *InstanceData.GetObjectPathString());
+					UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material instance %s to read its static permutation."), *InstanceData.GetObjectPathString());
 					continue;
 				}
 				if (!bWasAssetLoaded) ++LoadedAssetCount;
@@ -1166,7 +1168,7 @@ namespace Material
 				UE_LOG(
 					LogTemp,
 					Log,
-					TEXT("Material Analytics loaded and unloaded %d assets (master materials and users) for %d materials in %.2f s."),
+					TEXT("Material Analytics loaded and unloaded %d assets (masters, instances and users) for %d materials in %.2f s."),
 					BatchLoadedAssetCount,
 					MaterialsInBatch,
 					FPlatformTime::Seconds() - BatchStartSeconds);
@@ -1362,10 +1364,13 @@ namespace Material
 			return JsonText;
 		}
 
+		/** How long the notification is shown before the first blocking step runs. */
 		static constexpr double NotificationDisplayDelaySeconds = 0.2;
 		/** Longest time one tick spends processing materials before letting the editor repaint. */
 		static constexpr double TickTimeBudgetSeconds = 0.05;
+		/** Report rows gathered so far, one per processed master material. */
 		TArray<FMaterialAssetData> AssetItems;
+		/** Master materials found in the configured folders, processed in order. */
 		TArray<FAssetData> PendingAssets;
 		/** Direct child instances for every material or instance that has any, keyed by the parent's object path. */
 		TMap<FSoftObjectPath, TArray<FAssetData>> ChildInstancesByParent;
@@ -1375,11 +1380,13 @@ namespace Material
 		TMap<FName, FMaterialUser> UserByPackage;
 		/** Material uses of each user loaded so far in this run, so every user is loaded only once. */
 		TMap<FString, TArray<FMaterialUse>> UsesByUserPath;
-		/** Unloads the master materials loaded to read usage flags, after each batch. */
+		/** Unloads the packages each batch loaded. */
 		Core::FReportPackageUnloader PackageUnloader;
+		/** Ticker that runs Tick while a report is in progress; invalid when idle. */
 		FTSTicker::FDelegateHandle TickerHandle;
 		/** Notification that shows the report progress and the Cancel button. */
 		Core::FReportProgressNotification ProgressNotification;
+		/** Index in PendingAssets of the next master material to process. */
 		int32 NextAssetIndex = 0;
 		/** Stage the next Tick runs. */
 		ERunnerStep Step = ERunnerStep::ShowNotification;

@@ -31,7 +31,7 @@ public:
 	bool bIgnoreDeveloperReferences = true;
 
 	/**
-	 * Number of assets processed per editor tick in every report. Loaded assets are unloaded after each batch,
+	 * Number of assets processed in each batch in every report. Loaded assets are unloaded after each batch,
 	 * so higher values finish faster but raise peak memory use.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "General", meta = (ClampMin = "1", UIMin = "1", UIMax = "500"))
@@ -119,7 +119,7 @@ public:
 
 	/**
 	 * Lists, for each material usage (vertex factory) type, the assets that use the material or any of its counted
-	 * instances. Only users visible in the Asset Registry are found; other usage types are written with null users,
+	 * instances. Only users visible in the Asset Registry are found; other usage types have no Users list,
 	 * and actor-based types such as water are recognised in World Partition levels only.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Vertex Factory Counts (Registry Only)"))
@@ -141,10 +141,10 @@ public:
 	bool bMaterialResolveUsersByLoading = false;
 
 	/**
-	 * Counts the shader maps of each master on the editor's shader platform: the master and every counted instance
-	 * that overrides static parameters or base properties compile one shader map per quality level used by a
-	 * Quality Switch, plus one default. With Usage Flags on, also estimates the vertex factory permutations as
-	 * shader maps multiplied by enabled usage flags. Masters and instances are loaded and unloaded after each batch.
+	 * Finds the counted instances that compile their own shader map, how many unique static permutations they
+	 * make, how often each static switch is changed, and the shader count of the master plus one instance per
+	 * unique permutation from the engine's shader map layout. Masters and instances are loaded and unloaded after
+	 * each batch.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Shader Permutations (Needs Asset Loading)"))
 	bool bMaterialShaderPermutations = false;

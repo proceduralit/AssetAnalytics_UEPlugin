@@ -31,7 +31,6 @@
         MaxBoundsLengthM: "Max Bound Length (m)",
         MaterialSlots: "Material Slots",
         UVChannels: "UV Channels",
-        GenerateLightmapUVs: "Generate Lightmap UVs",
         LightmapResolution: "Lightmap Resolution"
     };
 
@@ -103,7 +102,7 @@
         }
     });
 
-	loadDefaultCsv();
+    loadDefaultCsv();
 
     function hasFiles(event) {
         return Array.from(event.dataTransfer?.types ?? []).includes("Files");
@@ -118,7 +117,7 @@
         }
 
         try {
-			loadCsvText(await file.text(), file.name);
+            loadCsvText(await file.text(), file.name);
         } catch (error) {
             showError(error instanceof Error ? error.message : "The CSV could not be loaded.");
         } finally {
@@ -126,49 +125,49 @@
         }
     }
 
-	async function loadDefaultCsv() {
-		if (window.location.protocol !== "http:" && window.location.protocol !== "https:") {
-			return;
-		}
+    async function loadDefaultCsv() {
+        if (window.location.protocol !== "http:" && window.location.protocol !== "https:") {
+            return;
+        }
 
-		try {
-			const response = await fetch("data", { cache: "no-store" });
-			if (!response.ok) {
-				return;
-			}
-			loadCsvText(await response.text(), "MeshAnalytics.csv");
-		} catch (error) {
-			showError(error instanceof Error ? error.message : "The generated CSV could not be loaded.");
-		}
-	}
+        try {
+            const response = await fetch("data", { cache: "no-store" });
+            if (!response.ok) {
+                return;
+            }
+            loadCsvText(await response.text(), "MeshAnalytics.csv");
+        } catch (error) {
+            showError(error instanceof Error ? error.message : "The generated CSV could not be loaded.");
+        }
+    }
 
-	function loadCsvText(text, fileName) {
-		const parsed = parseCsv(text);
-		const detectedColumns = detectColumns(parsed.headers, parsed.rows);
-		const detectedMetrics = detectedColumns.filter(column => column.type !== "string");
+    function loadCsvText(text, fileName) {
+        const parsed = parseCsv(text);
+        const detectedColumns = detectColumns(parsed.headers, parsed.rows);
+        const detectedMetrics = detectedColumns.filter(column => column.type !== "string");
 
-		if (parsed.rows.length === 0) {
-			throw new Error("The CSV contains headers but no analytics rows.");
-		}
-		if (detectedMetrics.length < 2) {
-			throw new Error("The CSV needs at least two numeric or True/False columns.");
-		}
-		if (typeof Plotly === "undefined") {
-			throw new Error("The local Plotly library could not be loaded.");
-		}
+        if (parsed.rows.length === 0) {
+            throw new Error("The CSV contains headers but no analytics rows.");
+        }
+        if (detectedMetrics.length < 2) {
+            throw new Error("The CSV needs at least two numeric or True/False columns.");
+        }
+        if (typeof Plotly === "undefined") {
+            throw new Error("The local Plotly library could not be loaded.");
+        }
 
-		rows = parsed.rows;
-		metrics = detectedMetrics;
-		filterColumns = detectedColumns.filter(column => column.key !== "AssetName");
-		populateAxisSelects();
-		const hasFilterColumns = resetFilterConditions();
-		fileSummary.textContent = `${fileName} · ${rows.length.toLocaleString()} rows`;
-		dropZone.classList.add("has-data");
-		xAxisSelect.disabled = false;
-		yAxisSelect.disabled = false;
-		addFilterButton.disabled = !hasFilterColumns;
-		renderChart();
-	}
+        rows = parsed.rows;
+        metrics = detectedMetrics;
+        filterColumns = detectedColumns.filter(column => column.key !== "AssetName");
+        populateAxisSelects();
+        const hasFilterColumns = resetFilterConditions();
+        fileSummary.textContent = `${fileName} · ${rows.length.toLocaleString()} rows`;
+        dropZone.classList.add("has-data");
+        xAxisSelect.disabled = false;
+        yAxisSelect.disabled = false;
+        addFilterButton.disabled = !hasFilterColumns;
+        renderChart();
+    }
 
     function parseCsv(text) {
         const table = [];

@@ -58,7 +58,7 @@ void FAssetAnalyticsModule::RegisterMenus()
 	Section.AddEntry(FToolMenuEntry::InitMenuEntry(
 		"GenerateMaterialAnalyticsReport",
 		LOCTEXT("GenerateMaterialAnalyticsReport", "Generate Material Analytics Report"),
-		LOCTEXT("GenerateMaterialAnalyticsReportTooltip", "Gather master material analytics and save the CSV."),
+		LOCTEXT("GenerateMaterialAnalyticsReportTooltip", "Gather master material analytics, save the JSON, and open the browser report."),
 		FSlateIcon(),
 		FUIAction(FExecuteAction::CreateStatic(&AssetAnalytics::Material::RunMaterialAnalyticsReport))));
 }

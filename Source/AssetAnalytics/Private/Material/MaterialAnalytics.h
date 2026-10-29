@@ -9,7 +9,7 @@ namespace AssetAnalytics
 {
 namespace Material
 {
-	/** Gathers master material data and saves it as a CSV report. */
+	/** Gathers master material data and saves it as a JSON report. */
 	void RunMaterialAnalyticsReport();
 
 	/** Stops the current Material Analytics report, if there is one. */

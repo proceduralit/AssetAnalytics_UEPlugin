@@ -22,7 +22,7 @@
     const defaultCookStatsSummary = cookStatsSummary.textContent;
     const reportBridgeUrl = "http://127.0.0.1:19842/asset-analytics/select";
 
-    // Usage status of a material or one of its vertex factories, shown in the details table and the Usage Status filter.
+    // Usage status of one vertex factory, shown in the vertex factory table.
     const usageStatuses = {
         usedNotEnabled: { label: "Used but not enabled", className: "used-not-enabled" },
         enabledUnused: { label: "Enabled but unused", className: "enabled-unused" },
@@ -437,12 +437,9 @@
         cookStatsSummary.textContent = parts.join(" · ");
     }
 
+    // Only called when cook stats are loaded, so every material has a cookedByMaterial entry.
     function shaderCountSource(material) {
-        const cooked = cookedByMaterial.get(material);
-        if (cooked?.shaderMaps > 0) {
-            return "Cooked";
-        }
-        return cooked ? "Not cooked" : "Estimated";
+        return cookedByMaterial.get(material).shaderMaps > 0 ? "Cooked" : "Not cooked";
     }
 
     // Builds one row per material with the values of every column, so the graph and filters can read them.
@@ -492,32 +489,19 @@
         return usageStatuses.notChecked;
     }
 
-    // Counts enabled and mismatched usage flags of a material and picks its overall status.
+    // Counts the enabled usage flags of a material, and those enabled without any user.
     function summarizeUsage(material) {
         let enabledCount = 0;
-        let usedNotEnabledCount = 0;
         let enabledUnusedCount = 0;
         Object.values(material.VertexFactories ?? {}).forEach(entry => {
             if (entry.Enabled === true) {
                 enabledCount += 1;
             }
-            const statusOfEntry = entryStatus(entry);
-            if (statusOfEntry === usageStatuses.usedNotEnabled) {
-                usedNotEnabledCount += 1;
-            } else if (statusOfEntry === usageStatuses.enabledUnused) {
+            if (entryStatus(entry) === usageStatuses.enabledUnused) {
                 enabledUnusedCount += 1;
             }
         });
-
-        let overallStatus = usageStatuses.ok;
-        if (material.UsageFlagsRead !== true) {
-            overallStatus = usageStatuses.notChecked;
-        } else if (usedNotEnabledCount > 0) {
-            overallStatus = usageStatuses.usedNotEnabled;
-        } else if (enabledUnusedCount > 0) {
-            overallStatus = usageStatuses.enabledUnused;
-        }
-        return { status: overallStatus, enabledCount, usedNotEnabledCount, enabledUnusedCount };
+        return { enabledCount, enabledUnusedCount };
     }
 
     function splitHeader(header) {
@@ -626,12 +610,7 @@
 
         condition.selectedValues = new Set();
         let valueEditor;
-        if (column.type === "boolean") {
-            valueEditor = document.createElement("select");
-            valueEditor.add(new Option("Any (inactive)", ""));
-            valueEditor.add(new Option("True", "true"));
-            valueEditor.add(new Option("False", "false"));
-        } else if (column.type === "number") {
+        if (column.type === "number") {
             valueEditor = document.createElement("input");
             valueEditor.type = "number";
             valueEditor.step = "any";
@@ -640,7 +619,7 @@
             valueEditor = createStringValueMenu(condition, column);
         }
         valueEditor.setAttribute("aria-label", `Filter condition ${condition.conditionId} value`);
-        if (column.type !== "string") {
+        if (column.type === "number") {
             valueEditor.addEventListener("change", renderChart);
         }
         condition.valueInput.replaceWith(valueEditor);
@@ -761,13 +740,12 @@
         const filteredOut = rows.length - filteredRows.length;
 
         const points = filteredRows.flatMap(row => {
-            const x = metricValue(row[xMetric.key], xMetric.type);
-            const y = metricValue(row[yMetric.key], yMetric.type);
+            const x = metricValue(row[xMetric.key]);
+            const y = metricValue(row[yMetric.key]);
             if (x === null || y === null) {
                 return [];
             }
-            const materialStatus = summarizeUsage(materials[row.materialIndex]).status;
-            return [{ row, x, y, materialStatus }];
+            return [{ row, x, y }];
         });
 
         const skipped = filteredRows.length - points.length;
@@ -784,7 +762,6 @@
                 point.row.PackagePath || "",
                 point.row[xMetric.key],
                 point.row[yMetric.key],
-                point.materialStatus.label,
                 point.row.materialIndex
             ]),
             marker: {
@@ -802,7 +779,6 @@
             hovertemplate:
                 "<b>%{customdata[0]}</b><br>" +
                 "%{customdata[1]}<br>" +
-                "Usage: %{customdata[4]}<br>" +
                 `${xMetric.label}: %{customdata[2]}<br>` +
                 `${yMetric.label}: %{customdata[3]}` +
                 "<extra></extra>"
@@ -858,7 +834,7 @@
             const point = event.points?.[0];
             const assetName = point?.customdata?.[0];
             const packagePath = point?.customdata?.[1];
-            const material = materials[point?.customdata?.[5]];
+            const material = materials[point?.customdata?.[4]];
             if (!assetName || !packagePath || !material) {
                 clearSelectedAsset();
                 return;
@@ -979,6 +955,19 @@
         container.append(item);
     }
 
+    // Creates an empty details-panel table with the given column headers, returning the table and its body.
+    function createDetailsTable(headers) {
+        const table = document.createElement("table");
+        table.className = "details-table";
+        const head = table.createTHead().insertRow();
+        headers.forEach(text => {
+            const cell = document.createElement("th");
+            cell.textContent = text;
+            head.append(cell);
+        });
+        return { table, body: table.createTBody() };
+    }
+
     function createVertexFactoryTable(material) {
         const fragment = document.createDocumentFragment();
         const heading = document.createElement("h3");
@@ -1002,16 +991,7 @@
         };
         entries.sort(([, left], [, right]) => rank(left) - rank(right));
 
-        const table = document.createElement("table");
-        table.className = "vertex-factory-table";
-        const head = table.createTHead().insertRow();
-        ["Vertex factory", "Enabled", "Status", "Users"].forEach(text => {
-            const cell = document.createElement("th");
-            cell.textContent = text;
-            head.append(cell);
-        });
-
-        const body = table.createTBody();
+        const { table, body } = createDetailsTable(["Vertex factory", "Enabled", "Status", "Users"]);
         entries.forEach(([key, entry]) => {
             const row = body.insertRow();
             row.insertCell().textContent = splitHeader(key);
@@ -1064,15 +1044,7 @@
         const sortedSwitches = [...staticSwitches].sort((left, right) =>
             (right.ChangedCount ?? 0) - (left.ChangedCount ?? 0) ||
             String(left.Name).localeCompare(String(right.Name)));
-        const table = document.createElement("table");
-        table.className = "vertex-factory-table";
-        const head = table.createTHead().insertRow();
-        ["Static switch", "Default", "Instances changing it"].forEach(text => {
-            const cell = document.createElement("th");
-            cell.textContent = text;
-            head.append(cell);
-        });
-        const body = table.createTBody();
+        const { table, body } = createDetailsTable(["Static switch", "Default", "Instances changing it"]);
         sortedSwitches.forEach(staticSwitch => {
             const row = body.insertRow();
             row.insertCell().textContent = staticSwitch.Name ?? "";
@@ -1169,13 +1141,10 @@
         }
     }
 
-    function metricValue(rawValue, type) {
+    function metricValue(rawValue) {
         const value = (rawValue ?? "").trim();
         if (value === "") {
             return null;
-        }
-        if (type === "boolean") {
-            return value.toLowerCase() === "true" ? 1 : 0;
         }
         const number = Number(value);
         return Number.isFinite(number) ? number : null;
@@ -1208,8 +1177,8 @@
                 continue;
             }
 
-            const value = column.type === "number" ? Number(rawValue) : rawValue;
-            if (column.type === "number" && !Number.isFinite(value)) {
+            const value = Number(rawValue);
+            if (!Number.isFinite(value)) {
                 const message = "Filter values must be valid numbers.";
                 condition.valueInput.setCustomValidity(message);
                 showError(message);
@@ -1234,9 +1203,7 @@
         if (filter.type === "string") {
             return filter.value.has(rawRowValue.trim());
         }
-        const rowValue = filter.type === "number"
-            ? metricValue(rawRowValue, "number")
-            : rawRowValue.trim().toLowerCase();
+        const rowValue = metricValue(rawRowValue);
         const filterValue = filter.value;
         if (filter.operator === "lt") {
             return rowValue < filterValue;
@@ -1248,7 +1215,7 @@
     }
 
     function axisLayout(metric) {
-        const layout = {
+        return {
             title: { text: metric.label, standoff: 16 },
             automargin: true,
             gridcolor: "#39424c",
@@ -1256,14 +1223,6 @@
             zerolinecolor: "#4b5661",
             tickcolor: "#65717d"
         };
-
-        if (metric.type === "boolean") {
-            layout.tickmode = "array";
-            layout.tickvals = [0, 1];
-            layout.ticktext = ["False", "True"];
-            layout.range = [-0.25, 1.25];
-        }
-        return layout;
     }
 
     function clearError() {

@@ -32,6 +32,7 @@ namespace AssetAnalytics
 {
 namespace Mesh
 {
+	/** Everything the report gathers for one static or skeletal mesh. Unknown numbers stay negative or INDEX_NONE. */
 	struct FMeshAssetData
 	{
 		/** Creates an empty report row for InAssetData. */
@@ -40,26 +41,58 @@ namespace Mesh
 		{
 		}
 
+		/** Registry entry of the mesh. */
 		FAssetData AssetData;
+		/** Whether the mesh is a skeletal mesh rather than a static mesh. */
 		bool bIsSkeletalMesh = false;
+		/** Size of the mesh's package on disk in bytes. */
 		int64 PackageDiskSize = -1;
+		/** Memory used by the mesh's physics data in bytes. */
 		int64 PhysicsSize = -1;
+		/** Number of LODs. */
 		int32 LODCount = INDEX_NONE;
+		/** LOD group name, or "None" for skeletal meshes and static meshes without one. */
 		FString LODGroup = TEXT("None");
+		/** Collision trace flag without its CTF_Use prefix, such as SimpleAndComplex. */
 		FString CollisionComplexity;
+		/** Number of simple collision shapes. */
 		int32 SimpleCollisionPrimitives = INDEX_NONE;
+		/** Vertices in the complex collision mesh. */
 		int32 ComplexCollisionVertices = INDEX_NONE;
+		/** Triangles in LOD 0. */
 		int32 TriangleCount = INDEX_NONE;
+		/** Whether Nanite is enabled on the mesh. */
 		bool bNaniteEnabled = false;
-		int32 NaniteTriangles = 0;
-		double NaniteFallbackPercent = 0.0;
+		/** Triangles in the Nanite mesh. */
+		int32 NaniteTriangles = INDEX_NONE;
+		/** Percentage of Nanite triangles kept in the fallback mesh. Skeletal meshes have none. */
+		double NaniteFallbackPercent = -1.0;
+		/** Number of material slots. */
 		int32 MaterialSlotCount = INDEX_NONE;
+		/** Unique textures used by the mesh's materials. */
 		int32 TextureCount = INDEX_NONE;
+		/** Largest width or height among those textures. */
 		int32 MaxTextureResolution = INDEX_NONE;
+		/** UV channels in LOD 0. */
 		int32 UVChannelCount = INDEX_NONE;
+		/** Lightmap resolution set on the mesh. */
 		int32 LightmapResolution = INDEX_NONE;
+		/** Longest side of the mesh bounds in meters. */
 		double MaxBoundsLengthM = -1.0;
 	};
+
+	/** Returns the report name of CollisionTraceFlag, resolving Default through the project's physics settings. */
+	static FString GetCollisionComplexityName(ECollisionTraceFlag CollisionTraceFlag)
+	{
+		if (CollisionTraceFlag == CTF_UseDefault) CollisionTraceFlag = UPhysicsSettings::Get()->DefaultShapeComplexity;
+		switch (CollisionTraceFlag)
+		{
+		case CTF_UseSimpleAndComplex: return TEXT("SimpleAndComplex");
+		case CTF_UseSimpleAsComplex: return TEXT("SimpleAsComplex");
+		case CTF_UseComplexAsSimple: return TEXT("ComplexAsSimple");
+		default: return TEXT("None");
+		}
+	}
 
 	/** Fills Item with the material and texture data enabled in Settings. */
 	static void GatherMaterialAnalyticsData(
@@ -112,8 +145,6 @@ namespace Mesh
 		const UAssetAnalyticsSettings& Settings,
 		FMeshAssetData& Item)
 	{
-		Item.bIsSkeletalMesh = true;
-		if (Settings.bLODGroup) Item.LODGroup = TEXT("None");
 		if (Settings.bLODCount) Item.LODCount = SkeletalMesh.GetLODNum();
 		if (Settings.bPhysicsSize && Item.PhysicsSize < 0)
 		{
@@ -179,28 +210,12 @@ namespace Mesh
 				Item.PhysicsSize = static_cast<int64>(EstimatedSize.GetTotalMemoryBytes());
 			}
 		}
-		if (Settings.bCollisionInfo)
+		// Registry values are kept when present, so a mesh reports the same values whether or not it was loaded.
+		if (Settings.bCollisionInfo && Item.CollisionComplexity.IsEmpty())
 		{
 			if (const UBodySetup* BodySetup = StaticMesh.GetBodySetup())
 			{
-				ECollisionTraceFlag CollisionTraceFlag = BodySetup->CollisionTraceFlag;
-				if (CollisionTraceFlag == CTF_UseDefault) CollisionTraceFlag = UPhysicsSettings::Get()->DefaultShapeComplexity;
-
-				switch (CollisionTraceFlag)
-				{
-				case CTF_UseSimpleAndComplex:
-					Item.CollisionComplexity = TEXT("SimpleAndComplex");
-					break;
-				case CTF_UseSimpleAsComplex:
-					Item.CollisionComplexity = TEXT("SimpleAsComplex");
-					break;
-				case CTF_UseComplexAsSimple:
-					Item.CollisionComplexity = TEXT("ComplexAsSimple");
-					break;
-				default:
-					Item.CollisionComplexity = TEXT("None");
-					break;
-				}
+				Item.CollisionComplexity = GetCollisionComplexityName(BodySetup->CollisionTraceFlag);
 				Item.SimpleCollisionPrimitives = BodySetup->AggGeom.GetElementCount();
 			}
 			else
@@ -208,7 +223,6 @@ namespace Mesh
 				Item.CollisionComplexity = TEXT("None");
 				Item.SimpleCollisionPrimitives = 0;
 			}
-
 		}
 		if (Settings.bComplexCollisionInfo)
 		{
@@ -231,7 +245,7 @@ namespace Mesh
 			}
 			GatherMaterialAnalyticsData(Materials, Settings, Item);
 		}
-		if (Settings.bMaxBoundsLength)
+		if (Settings.bMaxBoundsLength && Item.MaxBoundsLengthM < 0.0)
 		{
 			const FVector BoundsSize = StaticMesh.GetBounds().BoxExtent * 2.0f;
 			Item.MaxBoundsLengthM = FMath::Max(BoundsSize.GetMax(), 1.0f) / 100.0;
@@ -269,19 +283,26 @@ namespace Mesh
 			}
 		}
 
-		if (Item.bIsSkeletalMesh)
-		{
-			if (Settings.bLODGroup) Item.LODGroup = TEXT("None");
-			return;
-		}
+		// Skeletal meshes have no LOD group and do not store the remaining tags.
+		if (Item.bIsSkeletalMesh) return;
 
 		if (Settings.bLODGroup) AssetData.GetTagValue(TEXT("LODGroup"), Item.LODGroup);
 		if (Settings.bMaterialCount) AssetData.GetTagValue(TEXT("Materials"), Item.MaterialSlotCount);
 		if (Settings.bUVChannelCount) AssetData.GetTagValue(TEXT("UVChannels"), Item.UVChannelCount);
 		if (Settings.bCollisionInfo)
 		{
-			AssetData.GetTagValue(TEXT("CollisionComplexity"), Item.CollisionComplexity);
-			Item.CollisionComplexity.RemoveFromStart(TEXT("CTF_Use"));
+			// The tag holds the flag's enum name, such as CTF_UseDefault, or is empty without a body setup.
+			// It is mapped like a loaded mesh, so Default is resolved through the physics settings.
+			FString CollisionTraceFlagText;
+			if (AssetData.GetTagValue(TEXT("CollisionComplexity"), CollisionTraceFlagText))
+			{
+				ECollisionTraceFlag CollisionTraceFlag = CTF_MAX;
+				if (CollisionTraceFlagText == TEXT("CTF_UseDefault")) CollisionTraceFlag = CTF_UseDefault;
+				else if (CollisionTraceFlagText == TEXT("CTF_UseSimpleAndComplex")) CollisionTraceFlag = CTF_UseSimpleAndComplex;
+				else if (CollisionTraceFlagText == TEXT("CTF_UseSimpleAsComplex")) CollisionTraceFlag = CTF_UseSimpleAsComplex;
+				else if (CollisionTraceFlagText == TEXT("CTF_UseComplexAsSimple")) CollisionTraceFlag = CTF_UseComplexAsSimple;
+				Item.CollisionComplexity = GetCollisionComplexityName(CollisionTraceFlag);
+			}
 			AssetData.GetTagValue(TEXT("CollisionPrims"), Item.SimpleCollisionPrimitives);
 		}
 		if (Settings.bMaxBoundsLength)
@@ -301,6 +322,19 @@ namespace Mesh
 				}
 			}
 		}
+	}
+
+	/** Returns whether any enabled column can load a mesh, so batches know whether to track loaded packages. */
+	static bool CanLoadAssets(const UAssetAnalyticsSettings& Settings)
+	{
+		return Settings.bPhysicsSize ||
+			Settings.bTextureCount ||
+			Settings.bMaxTextureResolution ||
+			Settings.bMaterialCount ||
+			Settings.bUVChannelCount ||
+			Settings.bMaxBoundsLength ||
+			Settings.bComplexCollisionInfo ||
+			Settings.bLightmapResolution;
 	}
 
 	/** Returns whether the enabled columns require loading AssetData. */
@@ -336,6 +370,7 @@ namespace Mesh
 		return Item;
 	}
 
+	/** Gathers the Mesh Analytics report over several editor ticks and saves it when done. */
 	class FMeshAnalyticsRunner
 	{
 	public:
@@ -497,10 +532,11 @@ namespace Mesh
 		{
 			const double TickStartSeconds = FPlatformTime::Seconds();
 			const int32 AssetsPerBatch = FMath::Max(Settings.AssetsPerTick, 1);
+			const bool bLoadsAssets = CanLoadAssets(Settings);
 			while (NextAssetIndex < PendingAssets.Num())
 			{
 				// Snapshot loaded packages so everything this batch loads, including dependencies, can be unloaded afterwards.
-				if (AssetsInBatch == 0)
+				if (bLoadsAssets && AssetsInBatch == 0)
 				{
 					PackagesBeforeBatch = Core::FReportPackageUnloader::GetLoadedPackages();
 					bBatchLoadedAnyAsset = false;
@@ -619,17 +655,18 @@ namespace Mesh
 				ProgressNotification.Finish(
 					LOCTEXT("AutomaticExportFailed", "The mesh analytics CSV file could not be saved."),
 					SNotificationItem::CS_Fail);
+				ResetReportData();
 				return;
 			}
 
-			const FString ReportUrl = Core::GetAssetAnalyticsReportUrl();
+			const FString ReportUrl = Core::GetMeshAnalyticsReportUrl();
 			FPlatformProcess::LaunchURL(*ReportUrl, nullptr, nullptr);
 			ProgressNotification.Finish(
 				FText::Format(
 					LOCTEXT("MeshAnalyticsComplete", "Mesh Analytics report generated for {0} assets."),
 					FText::AsNumber(AssetItems.Num())),
 				SNotificationItem::CS_Success);
-			PendingAssets.Reset();
+			ResetReportData();
 		}
 
 		/** Returns CSV text containing the enabled columns and finished rows. */
@@ -705,15 +742,21 @@ namespace Mesh
 			return CsvData;
 		}
 
+		/** How long the notification is shown before the first blocking step runs. */
 		static constexpr double NotificationDisplayDelaySeconds = 0.2;
 		/** Longest time one tick spends processing assets before letting the editor repaint. */
 		static constexpr double TickTimeBudgetSeconds = 0.05;
+		/** Report rows gathered so far, one per processed mesh. */
 		TArray<FMeshAssetData> AssetItems;
+		/** Meshes found in the configured folders, processed in order. */
 		TArray<FAssetData> PendingAssets;
+		/** Unloads the packages each batch loaded. */
 		Core::FReportPackageUnloader PackageUnloader;
+		/** Ticker that runs Tick while a report is in progress; invalid when idle. */
 		FTSTicker::FDelegateHandle TickerHandle;
 		/** Notification that shows the report progress and the Cancel button. */
 		Core::FReportProgressNotification ProgressNotification;
+		/** Index in PendingAssets of the next mesh to process. */
 		int32 NextAssetIndex = 0;
 		/** Stage the next Tick runs. */
 		ERunnerStep Step = ERunnerStep::ShowNotification;

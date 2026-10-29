@@ -63,18 +63,6 @@ h1 {
     outline-offset: 2px;
 }
 
-.visually-hidden {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-}
-
 .filter-panel {
     width: min(860px, 100%);
     margin: 0 auto 18px;
@@ -143,13 +131,6 @@ h1 {
     cursor: default;
 }
 
-.filter-value-option {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    cursor: pointer;
-}
-
 .filter-value-list {
     max-height: 260px;
     overflow-y: auto;
@@ -157,9 +138,13 @@ h1 {
 }
 
 .filter-value-option {
+    display: flex;
+    align-items: center;
+    gap: 9px;
     min-height: 38px;
     padding: 7px 5px;
     border-bottom: 1px solid #2d353e;
+    cursor: pointer;
 }
 
 .filter-value-option:hover {

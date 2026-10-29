@@ -6,13 +6,13 @@
     <title>Mesh Analytics Report</title>
     <link id="report-stylesheet" rel="stylesheet" href="core/styles.css">
     <script>
-        if (window.location.protocol === "http:" || window.location.protocol === "https:") {
+        // The editor serves the report over HTTP; opened as a file, the page loads its files from disk.
+        const isEditorServed = window.location.protocol === "http:" || window.location.protocol === "https:";
+        if (isEditorServed) {
             document.getElementById("report-stylesheet").href = "styles";
         }
 
         window.addEventListener("DOMContentLoaded", () => {
-            const isEditorServed = window.location.protocol === "http:" ||
-                window.location.protocol === "https:";
             const plotlyScript = document.createElement("script");
             plotlyScript.src = isEditorServed ? "plotly" : "core/plotly-basic-3.7.0.min.js";
             plotlyScript.addEventListener("load", () => {

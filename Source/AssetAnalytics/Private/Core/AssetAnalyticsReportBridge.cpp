@@ -33,8 +33,8 @@ namespace Core
 	static const TCHAR* MaterialReportPlotlyRoutePath = TEXT("/asset-analytics/material-report/plotly");
 	static const TCHAR* MaterialReportJsonRoutePath = TEXT("/asset-analytics/material-report/data");
 
-	/** Returns the local URL that opens the report page. */
-	FString GetAssetAnalyticsReportUrl()
+	/** Returns the local URL that opens the Mesh Analytics report page. */
+	FString GetMeshAnalyticsReportUrl()
 	{
 		return FString::Printf(TEXT("http://127.0.0.1:%u%s"), ReportBridgePort, ReportPageRoutePath);
 	}
@@ -45,22 +45,13 @@ namespace Core
 		return FString::Printf(TEXT("http://127.0.0.1:%u%s"), ReportBridgePort, MaterialReportPageRoutePath);
 	}
 
-	/** Returns true for local requests, or all requests when the engine does not expose peer addresses. */
-	template <typename RequestType>
-	static auto IsLoopbackRequest(const RequestType& Request, int)
-		-> decltype(Request.PeerAddress, bool())
+	/** Returns whether Request came from this machine. */
+	static bool IsLoopbackRequest(const FHttpServerRequest& Request)
 	{
 		const FString PeerAddress = Request.PeerAddress.IsValid()
 			? Request.PeerAddress->ToString(false)
 			: FString();
 		return PeerAddress == TEXT("::1") || PeerAddress.StartsWith(TEXT("127."));
-	}
-
-	/** Lets older engine versions pass the check because they do not provide the peer address. */
-	template <typename RequestType>
-	static bool IsLoopbackRequest(const RequestType&, long)
-	{
-		return true;
 	}
 
 	/** Returns the full path to RelativePath inside the plugin folder. */
@@ -95,7 +86,7 @@ namespace Core
 		const FString& FilePath,
 		const FString& ContentType)
 	{
-		if (!IsLoopbackRequest(Request, 0))
+		if (!IsLoopbackRequest(Request))
 		{
 			OnComplete(MakeReportBridgeResponse(
 				TEXT("Only loopback requests are accepted."),
@@ -201,7 +192,7 @@ namespace Core
 		const FHttpServerRequest& Request,
 		const FHttpResultCallback& OnComplete)
 	{
-		if (!IsLoopbackRequest(Request, 0))
+		if (!IsLoopbackRequest(Request))
 		{
 			OnComplete(MakeReportBridgeResponse(
 				TEXT("Only loopback requests are accepted."),
@@ -257,42 +248,10 @@ namespace Core
 		return true;
 	}
 
-	/** Uses the newer HTTP server router call when the engine supports it. */
-	template <typename HttpServerModuleType>
-	static auto GetReportHttpRouter(HttpServerModuleType& HttpServerModule, int)
-		-> decltype(HttpServerModule.GetHttpRouter(ReportBridgePort, true))
-	{
-		return HttpServerModule.GetHttpRouter(ReportBridgePort, true);
-	}
-
-	/** Falls back to the older router call that only takes a port. */
-	template <typename HttpServerModuleType>
-	static auto GetReportHttpRouter(HttpServerModuleType& HttpServerModule, long)
-		-> decltype(HttpServerModule.GetHttpRouter(ReportBridgePort))
-	{
-		return HttpServerModule.GetHttpRouter(ReportBridgePort);
-	}
-
-	/** Wraps Function in a delegate when the engine uses delegate handlers. */
-	template <typename HandlerType, typename FunctionType>
-	static auto MakeReportRequestHandler(FunctionType Function, int)
-		-> decltype(HandlerType::CreateStatic(Function))
-	{
-		return HandlerType::CreateStatic(Function);
-	}
-
-	/** Wraps Function directly when the engine uses callable handlers. */
-	template <typename HandlerType, typename FunctionType>
-	static HandlerType MakeReportRequestHandler(FunctionType Function, long)
-	{
-		return HandlerType(Function);
-	}
-
 	/** Starts the local report server and registers all report routes. */
 	void FAssetAnalyticsReportBridge::Start()
 	{
-		FHttpServerModule& HttpServerModule = FHttpServerModule::Get();
-		ReportHttpRouter = GetReportHttpRouter(HttpServerModule, 0);
+		ReportHttpRouter = FHttpServerModule::Get().GetHttpRouter(ReportBridgePort, true);
 		if (!ReportHttpRouter.IsValid())
 		{
 			UE_LOG(LogTemp, Warning, TEXT("Asset Analytics report bridge could not bind to port %u."), ReportBridgePort);
@@ -302,48 +261,48 @@ namespace Core
 		SelectAssetRoute = ReportHttpRouter->BindRoute(
 			FHttpPath(ReportBridgeRoute),
 			EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_OPTIONS,
-			MakeReportRequestHandler<FHttpRequestHandler>(&HandleReportBridgeRequest, 0));
+			FHttpRequestHandler::CreateStatic(&HandleReportBridgeRequest));
 		ReportPageRoute = ReportHttpRouter->BindRoute(
 			FHttpPath(ReportPageRoutePath),
 			EHttpServerRequestVerbs::VERB_GET,
-			MakeReportRequestHandler<FHttpRequestHandler>(&HandleReportPageRequest, 0));
+			FHttpRequestHandler::CreateStatic(&HandleReportPageRequest));
 		ReportStylesRoute = ReportHttpRouter->BindRoute(
 			FHttpPath(ReportStylesRoutePath),
 			EHttpServerRequestVerbs::VERB_GET,
-			MakeReportRequestHandler<FHttpRequestHandler>(&HandleReportStylesRequest, 0));
+			FHttpRequestHandler::CreateStatic(&HandleReportStylesRequest));
 		ReportScriptRoute = ReportHttpRouter->BindRoute(
 			FHttpPath(ReportScriptRoutePath),
 			EHttpServerRequestVerbs::VERB_GET,
-			MakeReportRequestHandler<FHttpRequestHandler>(&HandleReportScriptRequest, 0));
+			FHttpRequestHandler::CreateStatic(&HandleReportScriptRequest));
 		ReportPlotlyRoute = ReportHttpRouter->BindRoute(
 			FHttpPath(ReportPlotlyRoutePath),
 			EHttpServerRequestVerbs::VERB_GET,
-			MakeReportRequestHandler<FHttpRequestHandler>(&HandleReportPlotlyRequest, 0));
+			FHttpRequestHandler::CreateStatic(&HandleReportPlotlyRequest));
 		ReportCsvRoute = ReportHttpRouter->BindRoute(
 			FHttpPath(ReportCsvRoutePath),
 			EHttpServerRequestVerbs::VERB_GET,
-			MakeReportRequestHandler<FHttpRequestHandler>(&HandleReportCsvRequest, 0));
+			FHttpRequestHandler::CreateStatic(&HandleReportCsvRequest));
 		// The material page uses the same relative file names, so the shared styles and Plotly handlers are reused.
 		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
 			FHttpPath(MaterialReportPageRoutePath),
 			EHttpServerRequestVerbs::VERB_GET,
-			MakeReportRequestHandler<FHttpRequestHandler>(&HandleMaterialReportPageRequest, 0)));
+			FHttpRequestHandler::CreateStatic(&HandleMaterialReportPageRequest)));
 		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
 			FHttpPath(MaterialReportStylesRoutePath),
 			EHttpServerRequestVerbs::VERB_GET,
-			MakeReportRequestHandler<FHttpRequestHandler>(&HandleReportStylesRequest, 0)));
+			FHttpRequestHandler::CreateStatic(&HandleReportStylesRequest)));
 		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
 			FHttpPath(MaterialReportScriptRoutePath),
 			EHttpServerRequestVerbs::VERB_GET,
-			MakeReportRequestHandler<FHttpRequestHandler>(&HandleMaterialReportScriptRequest, 0)));
+			FHttpRequestHandler::CreateStatic(&HandleMaterialReportScriptRequest)));
 		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
 			FHttpPath(MaterialReportPlotlyRoutePath),
 			EHttpServerRequestVerbs::VERB_GET,
-			MakeReportRequestHandler<FHttpRequestHandler>(&HandleReportPlotlyRequest, 0)));
+			FHttpRequestHandler::CreateStatic(&HandleReportPlotlyRequest)));
 		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
 			FHttpPath(MaterialReportJsonRoutePath),
 			EHttpServerRequestVerbs::VERB_GET,
-			MakeReportRequestHandler<FHttpRequestHandler>(&HandleMaterialReportJsonRequest, 0)));
+			FHttpRequestHandler::CreateStatic(&HandleMaterialReportJsonRequest)));
 		const bool bMaterialRoutesValid = !MaterialReportRoutes.ContainsByPredicate(
 			[](const TSharedPtr<const FHttpRouteHandleInternal>& Route) { return !Route.IsValid(); });
 
@@ -357,7 +316,7 @@ namespace Core
 			return;
 		}
 
-		HttpServerModule.StartAllListeners();
+		FHttpServerModule::Get().StartAllListeners();
 	}
 
 	/** Removes the report routes without stopping other HTTP listeners. */
