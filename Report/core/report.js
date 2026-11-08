@@ -1,12 +1,22 @@
+// Shared report engine for every Asset Analytics report type: file loading, filters, axes, graph and details panel.
+// Each report type (mesh.js, material.js) adds itself to window.AssetAnalyticsReportTypes before this script runs.
+// A report type describes its JSON and page:
+//   id, title, listKey (the JSON list of assets), noun, nounPlural, dataRoute (editor route of its generated JSON),
+//   defaultFileName, columns, defaultAxes ([x key, y key]), defaultFilterColumn (optional),
+//   renderDetails(asset, panel, ui), and the optional hooks
+//   init(context), onReportLoaded(report), beforeBuild(assets), afterShow(assets), pointStyle(row), loadCsv(file).
 (() => {
     "use strict";
 
+    const reportTypes = window.AssetAnalyticsReportTypes ?? [];
     const chooseFileButton = document.getElementById("choose-file");
-    const fileInput = document.getElementById("csv-file");
+    const fileInput = document.getElementById("json-file");
+    const reportTitle = document.getElementById("report-title");
     const addFilterButton = document.getElementById("add-filter");
     const filterList = document.getElementById("filter-list");
     const dropZone = document.getElementById("drop-zone");
     const chart = document.getElementById("chart");
+    const selectedAssetLabel = document.getElementById("selected-asset-label");
     const selectedAssetText = document.getElementById("selected-asset");
     const bridgeStatus = document.getElementById("bridge-status");
     const showInContentBrowserButton = document.getElementById("show-in-content-browser");
@@ -14,26 +24,20 @@
     const yAxisSelect = document.getElementById("y-axis");
     const fileSummary = document.getElementById("file-summary");
     const status = document.getElementById("status");
+    const detailsPanel = document.getElementById("asset-details");
     const reportBridgeUrl = "http://127.0.0.1:19842/asset-analytics/select";
+    const defaultPointStyle = { color: "#36a3ff", borderColor: "#b9ddff" };
 
-    const preferredLabels = {
-        PackageDiskSize: "Package Disk Size (bytes)",
-        LODCount: "LODs",
-        LODGroup: "LOD Group",
-        CollisionComplexity: "Collision Complexity",
-        SimpleCollisionPrimitives: "Simple Collision Primitives",
-        PhysicsSizeMB: "Physics Size (MB)",
-        ComplexCollisionVertices: "Complex Collision Verts",
-        LOD0Triangles: "Number of Triangles",
-        NaniteEnabled: "Nanite Enabled",
-        NaniteTriangles: "Nanite Triangles",
-        NaniteFallbackPercent: "Nanite Fallback (%)",
-        MaxBoundsLengthM: "Max Bound Length (m)",
-        MaterialSlots: "Material Slots",
-        UVChannels: "UV Channels",
-        LightmapResolution: "Lightmap Resolution"
-    };
+    // Details-panel helpers handed to each report type's renderDetails.
+    const detailsHelpers = { addSummaryItem, addNumberItem, appendPathSection, createPathLink, createPathList, formatBytes };
 
+    // The report type of the page URL's ?type= value, which also picks the JSON the editor serves. Null for none.
+    const urlType = reportTypes.find(type => type.id === new URLSearchParams(window.location.search).get("type")) ?? null;
+
+    // The report type whose assets are shown, or the URL's type before a report is loaded.
+    let activeType = null;
+    let assets = [];
+    let reportFileName = "";
     let rows = [];
     let metrics = [];
     let filterColumns = [];
@@ -56,7 +60,11 @@
     xAxisSelect.addEventListener("change", renderChart);
     yAxisSelect.addEventListener("change", renderChart);
     addFilterButton.addEventListener("click", () => addFilterCondition());
-    showInContentBrowserButton.addEventListener("click", showSelectedAssetInUnreal);
+    showInContentBrowserButton.addEventListener("click", () => {
+        if (selectedAsset) {
+            selectInUnreal(selectedAsset.packagePath, selectedAsset.assetName);
+        }
+    });
     chart.addEventListener("contextmenu", event => event.preventDefault());
 
     document.addEventListener("click", event => {
@@ -102,66 +110,146 @@
         }
     });
 
-    loadDefaultCsv();
+    reportTypes.forEach(type => type.init?.({
+        // Rebuilds the page from the loaded assets when they belong to this type. Returns false when they do not.
+        refresh: () => {
+            if (activeType !== type || assets.length === 0) {
+                return false;
+            }
+            showAssets(type, assets, reportFileName);
+            return true;
+        },
+        clearError,
+        showError
+    }));
+    setActiveType(urlType);
+    loadDefaultReport();
+
+    // Shows the title, labels and type-specific controls of type; null shows the page for any report.
+    function setActiveType(type) {
+        activeType = type;
+        const title = type ? type.title : "Asset Analytics";
+        document.title = `${title} Report`;
+        reportTitle.textContent = title;
+        selectedAssetLabel.textContent = `Selected ${type ? type.noun : "asset"}`;
+        dropZone.setAttribute("aria-label", `${title} scatter plot`);
+        detailsPanel.setAttribute("aria-label", `Selected ${type ? type.noun : "asset"} details`);
+        document.querySelectorAll("[data-report-type]").forEach(element => {
+            element.hidden = element.dataset.reportType !== type?.id;
+        });
+        if (assets.length === 0) {
+            fileSummary.textContent = type
+                ? `Choose or drop a ${type.title} JSON file to begin.`
+                : `Choose or drop a ${reportTypes.map(item => item.title).join(" or ")} JSON file to begin.`;
+        }
+    }
 
     function hasFiles(event) {
         return Array.from(event.dataTransfer?.types ?? []).includes("Files");
     }
 
+    // Loads a report JSON, or hands a CSV to the report type that reads one (Material Analytics cook stats).
     async function loadFile(file) {
         clearError();
 
-        if (!file.name.toLowerCase().endsWith(".csv")) {
-            showError("Please choose a CSV file.");
+        const fileName = file.name.toLowerCase();
+        if (fileName.endsWith(".csv")) {
+            const csvType = reportTypes.find(type => type.loadCsv);
+            if (!csvType) {
+                showError("Please choose an Asset Analytics JSON file.");
+            } else if (activeType !== csvType && assets.length > 0) {
+                showError(`CSV files can only be added to a ${csvType.title} report.`);
+            } else {
+                if (activeType !== csvType) {
+                    setActiveType(csvType);
+                }
+                csvType.loadCsv(file);
+            }
+            return;
+        }
+        if (!fileName.endsWith(".json")) {
+            showError("Please choose an Asset Analytics JSON file.");
             return;
         }
 
         try {
-            loadCsvText(await file.text(), file.name);
+            loadReportText(await file.text(), file.name);
         } catch (error) {
-            showError(error instanceof Error ? error.message : "The CSV could not be loaded.");
+            showError(error instanceof Error ? error.message : "The JSON could not be loaded.");
         } finally {
             fileInput.value = "";
         }
     }
 
-    async function loadDefaultCsv() {
-        if (window.location.protocol !== "http:" && window.location.protocol !== "https:") {
+    // Loads the JSON the editor generated for the URL's report type. Does nothing when the page is opened as a file.
+    async function loadDefaultReport() {
+        if (!urlType || (window.location.protocol !== "http:" && window.location.protocol !== "https:")) {
             return;
         }
 
         try {
-            const response = await fetch("data", { cache: "no-store" });
+            const response = await fetch(urlType.dataRoute, { cache: "no-store" });
             if (!response.ok) {
                 return;
             }
-            loadCsvText(await response.text(), "MeshAnalytics.csv");
+            loadReportText(await response.text(), urlType.defaultFileName);
         } catch (error) {
-            showError(error instanceof Error ? error.message : "The generated CSV could not be loaded.");
+            showError(error instanceof Error ? error.message : "The generated JSON could not be loaded.");
         }
     }
 
-    function loadCsvText(text, fileName) {
-        const parsed = parseCsv(text);
-        const detectedColumns = detectColumns(parsed.headers, parsed.rows);
-        const detectedMetrics = detectedColumns.filter(column => column.type !== "string");
-
-        if (parsed.rows.length === 0) {
-            throw new Error("The CSV contains headers but no analytics rows.");
+    // Finds the report type from the JSON's asset list and shows its assets.
+    // Throws when the text is not an Asset Analytics report or has no assets.
+    function loadReportText(text, fileName) {
+        let report;
+        try {
+            report = JSON.parse(text);
+        } catch {
+            throw new Error("The file is not valid JSON.");
         }
-        if (detectedMetrics.length < 2) {
-            throw new Error("The CSV needs at least two numeric or True/False columns.");
+        const type = reportTypes.find(item => Array.isArray(report?.[item.listKey]));
+        if (!type) {
+            const listNames = reportTypes.map(item => item.listKey).join(" or ");
+            throw new Error(`The JSON has no ${listNames} list. Is it an Asset Analytics report?`);
+        }
+        const reportAssets = report[type.listKey];
+        if (reportAssets.length === 0) {
+            throw new Error(`The report contains no ${type.nounPlural}.`);
         }
         if (typeof Plotly === "undefined") {
             throw new Error("The local Plotly library could not be loaded.");
         }
 
-        rows = parsed.rows;
-        metrics = detectedMetrics;
-        filterColumns = detectedColumns.filter(column => column.key !== "AssetName");
+        type.onReportLoaded?.(report);
+        showAssets(type, reportAssets, fileName);
+    }
+
+    // Builds the rows, graph menus and filters for the assets of a report type and draws the graph.
+    // Throws when the assets do not have two values to plot.
+    function showAssets(type, reportAssets, fileName) {
+        type.beforeBuild?.(reportAssets);
+        const builtRows = buildRows(type, reportAssets);
+        const availableColumns = type.columns.filter(column => builtRows.some(row => row[column.key] !== ""));
+        const availableMetrics = availableColumns.filter(column => column.axis);
+        if (availableMetrics.length < 2) {
+            throw new Error(`The report needs at least two numeric or True/False values per ${type.noun} to draw a graph.`);
+        }
+
+        assets = reportAssets;
+        reportFileName = fileName;
+        if (activeType !== type) {
+            // A new report type starts from its own default axes rather than the previous type's.
+            xAxisSelect.replaceChildren();
+            yAxisSelect.replaceChildren();
+            setActiveType(type);
+        }
+        rows = builtRows;
+        metrics = availableMetrics;
+        filterColumns = availableColumns.filter(column => column.filter);
         populateAxisSelects();
         const hasFilterColumns = resetFilterConditions();
-        fileSummary.textContent = `${fileName} · ${rows.length.toLocaleString()} rows`;
+        fileSummary.textContent = `${fileName} · ${rows.length.toLocaleString()} ${type.nounPlural}`;
+        type.afterShow?.(reportAssets);
         dropZone.classList.add("has-data");
         xAxisSelect.disabled = false;
         yAxisSelect.disabled = false;
@@ -169,103 +257,26 @@
         renderChart();
     }
 
-    function parseCsv(text) {
-        const table = [];
-        let row = [];
-        let field = "";
-        let quoted = false;
-
-        for (let index = 0; index < text.length; index += 1) {
-            const character = text[index];
-
-            if (quoted) {
-                if (character === '"' && text[index + 1] === '"') {
-                    field += '"';
-                    index += 1;
-                } else if (character === '"') {
-                    quoted = false;
+    // Builds one row per asset with the values of every column as text, so the graph and filters can read them.
+    // Booleans become "True" or "False"; missing values become "".
+    function buildRows(type, reportAssets) {
+        return reportAssets.map((asset, assetIndex) => {
+            const row = {
+                assetIndex,
+                AssetName: String(asset.AssetName ?? "")
+            };
+            type.columns.forEach(column => {
+                const value = column.value(asset);
+                if (value === undefined || value === null) {
+                    row[column.key] = "";
+                } else if (typeof value === "boolean") {
+                    row[column.key] = value ? "True" : "False";
                 } else {
-                    field += character;
+                    row[column.key] = String(value);
                 }
-            } else if (character === '"' && field.length === 0) {
-                quoted = true;
-            } else if (character === ",") {
-                row.push(field);
-                field = "";
-            } else if (character === "\n") {
-                row.push(field);
-                table.push(row);
-                row = [];
-                field = "";
-            } else if (character !== "\r") {
-                field += character;
-            }
-        }
-
-        if (quoted) {
-            throw new Error("The CSV has an unterminated quoted field.");
-        }
-        if (field.length > 0 || row.length > 0) {
-            row.push(field);
-            table.push(row);
-        }
-
-        while (table.length > 0 && table[table.length - 1].every(value => value.trim() === "")) {
-            table.pop();
-        }
-        if (table.length === 0) {
-            throw new Error("The CSV is empty.");
-        }
-
-        const headers = table[0].map((value, index) => {
-            const header = value.replace(/^\uFEFF/, "").trim();
-            if (!header) {
-                throw new Error(`Column ${index + 1} has no header.`);
-            }
-            return header;
-        });
-
-        if (new Set(headers).size !== headers.length) {
-            throw new Error("The CSV contains duplicate column headers.");
-        }
-
-        const parsedRows = table.slice(1).map(values => {
-            const result = {};
-            headers.forEach((header, index) => {
-                result[header] = values[index] ?? "";
             });
-            return result;
+            return row;
         });
-
-        return { headers, rows: parsedRows };
-    }
-
-    function detectColumns(headers, parsedRows) {
-        return headers.flatMap(header => {
-            const values = parsedRows
-                .map(row => row[header].trim())
-                .filter(value => value !== "");
-
-            if (values.length === 0) {
-                return [];
-            }
-
-            const isBoolean = values.every(value => /^(true|false)$/i.test(value));
-            const isNumeric = values.every(value => Number.isFinite(Number(value)));
-            return [{
-                key: header,
-                label: preferredLabels[header] ?? splitHeader(header),
-                type: isBoolean ? "boolean" : isNumeric ? "number" : "string",
-                integerTicks: header === "LODCount"
-            }];
-        });
-    }
-
-    function splitHeader(header) {
-        return header
-            .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-            .replace(/[_-]+/g, " ")
-            .replace(/\b\w/g, character => character.toUpperCase());
     }
 
     function populateAxisSelects() {
@@ -279,8 +290,9 @@
             yAxisSelect.add(new Option(metric.label, metric.key));
         });
 
-        xAxisSelect.value = chooseMetric(previousX, "MaxBoundsLengthM", 0);
-        yAxisSelect.value = chooseMetric(previousY, "LOD0Triangles", Math.min(1, metrics.length - 1));
+        const [defaultX, defaultY] = activeType.defaultAxes;
+        xAxisSelect.value = chooseMetric(previousX, defaultX, 0);
+        yAxisSelect.value = chooseMetric(previousY, defaultY, Math.min(1, metrics.length - 1));
 
         if (xAxisSelect.value === yAxisSelect.value && metrics.length > 1) {
             yAxisSelect.value = metrics.find(metric => metric.key !== xAxisSelect.value).key;
@@ -312,8 +324,8 @@
         const columnSelect = document.createElement("select");
         columnSelect.setAttribute("aria-label", `Filter condition ${conditionId} column`);
         filterColumns.forEach(column => columnSelect.add(new Option(column.label, column.key)));
-        columnSelect.value = filterColumns.some(column => column.key === "LODCount")
-            ? "LODCount"
+        columnSelect.value = filterColumns.some(column => column.key === activeType.defaultFilterColumn)
+            ? activeType.defaultFilterColumn
             : filterColumns[0].key;
 
         const operatorSelect = document.createElement("select");
@@ -431,7 +443,7 @@
                 checkbox.id = `filter-${condition.conditionId}-value-${index + 1}`;
                 checkbox.setAttribute(
                     "aria-label",
-                    `${value}, ${count.toLocaleString()} ${count === 1 ? "row" : "rows"}`);
+                    `${value}, ${count.toLocaleString()} ${count === 1 ? activeType.noun : activeType.nounPlural}`);
                 checkbox.addEventListener("change", () => {
                     if (checkbox.checked) {
                         condition.selectedValues.add(value);
@@ -503,21 +515,15 @@
             rowFilters.every(filter => matchesFilter(row, filter)));
         const filteredOut = rows.length - filteredRows.length;
 
+        // A report type may color points by a value, such as static and skeletal meshes, and name it in the tooltip.
+        const pointStyle = activeType.pointStyle ?? (() => defaultPointStyle);
         const points = filteredRows.flatMap(row => {
             const x = metricValue(row[xMetric.key], xMetric.type);
             const y = metricValue(row[yMetric.key], yMetric.type);
             if (x === null || y === null) {
                 return [];
             }
-            const isSkeletalMesh = isSkeletalMeshRow(row);
-            return [{
-                row,
-                x,
-                y,
-                assetType: isSkeletalMesh ? "Skeletal Mesh" : "Static Mesh",
-                pointColor: isSkeletalMesh ? "#ff5ca8" : "#36a3ff",
-                borderColor: isSkeletalMesh ? "#ffd0e5" : "#b9ddff"
-            }];
+            return [{ row, x, y, style: pointStyle(row) }];
         });
 
         const skipped = filteredRows.length - points.length;
@@ -530,15 +536,16 @@
             x: points.map(point => point.x),
             y: points.map(point => point.y),
             customdata: points.map(point => [
-                point.row.AssetName || "Unnamed asset",
+                point.row.AssetName || `Unnamed ${activeType.noun}`,
                 point.row.PackagePath || "",
                 point.row[xMetric.key],
                 point.row[yMetric.key],
-                point.assetType
+                point.row.assetIndex,
+                point.style.label ?? ""
             ]),
             marker: {
-                color: points.map(point => point.pointColor),
-                line: { color: points.map(point => point.borderColor), width: 1 },
+                color: points.map(point => point.style.color),
+                line: { color: points.map(point => point.style.borderColor), width: 1 },
                 opacity: 0.76,
                 size: 10
             },
@@ -551,7 +558,7 @@
             hovertemplate:
                 "<b>%{customdata[0]}</b><br>" +
                 "%{customdata[1]}<br>" +
-                "Type: %{customdata[4]}<br>" +
+                (activeType.pointStyle ? "Type: %{customdata[5]}<br>" : "") +
                 `${xMetric.label}: %{customdata[2]}<br>` +
                 `${yMetric.label}: %{customdata[3]}` +
                 "<extra></extra>"
@@ -566,7 +573,7 @@
             hoverlabel: { bgcolor: "#0d0f12", bordercolor: "#536170", font: { color: "#f3f5f7" } },
             showlegend: false,
             dragmode: "pan",
-            uirevision: `${xMetric.key}:${yMetric.key}`,
+            uirevision: `${activeType.id}:${xMetric.key}:${yMetric.key}`,
             xaxis: axisLayout(xMetric),
             yaxis: axisLayout(yMetric)
         };
@@ -592,9 +599,10 @@
         }).then(bindChartHandlers);
 
         status.classList.remove("error");
-        status.textContent = `${points.length.toLocaleString()} points plotted` +
-            (filteredOut > 0 ? ` · ${filteredOut.toLocaleString()} rows filtered out` : "") +
-            (skipped > 0 ? ` · ${skipped.toLocaleString()} rows skipped because an axis value is missing` : "");
+        status.textContent =
+            `${points.length.toLocaleString()} ${points.length === 1 ? activeType.noun : activeType.nounPlural} plotted` +
+            (filteredOut > 0 ? ` · ${filteredOut.toLocaleString()} filtered out` : "") +
+            (skipped > 0 ? ` · ${skipped.toLocaleString()} skipped because an axis value is missing` : "");
     }
 
     function bindChartHandlers() {
@@ -607,7 +615,8 @@
             const point = event.points?.[0];
             const assetName = point?.customdata?.[0];
             const packagePath = point?.customdata?.[1];
-            if (!assetName || !packagePath) {
+            const asset = assets[point?.customdata?.[4]];
+            if (!assetName || !packagePath || !asset) {
                 clearSelectedAsset();
                 return;
             }
@@ -617,6 +626,7 @@
             bridgeStatus.classList.remove("error");
             bridgeStatus.textContent = "Ready to send to Unreal Editor.";
             showInContentBrowserButton.disabled = false;
+            renderDetails(asset);
             Plotly.restyle(chart, { selectedpoints: [[point.pointNumber]] }, [point.curveNumber]);
         });
         chart.addEventListener("click", event => {
@@ -654,22 +664,123 @@
         bridgeStatus.classList.remove("error");
         bridgeStatus.textContent = "";
         showInContentBrowserButton.disabled = true;
+        detailsPanel.hidden = true;
+        detailsPanel.replaceChildren();
     }
 
-    async function showSelectedAssetInUnreal() {
-        if (!selectedAsset) {
-            return;
-        }
+    // Fills the details panel below the graph with the asset's name and path, then the report type's details.
+    function renderDetails(asset) {
+        detailsPanel.replaceChildren();
 
-        const requestedAsset = selectedAsset;
+        const title = document.createElement("h2");
+        title.textContent = asset.AssetName ?? `Unnamed ${activeType.noun}`;
+        const path = document.createElement("p");
+        path.className = "details-path";
+        path.textContent = asset.PackagePath ?? "";
+        detailsPanel.append(title, path);
+
+        activeType.renderDetails(asset, detailsPanel, detailsHelpers);
+        detailsPanel.hidden = false;
+    }
+
+    function addSummaryItem(container, label, value) {
+        const item = document.createElement("span");
+        const labelText = document.createElement("b");
+        labelText.textContent = `${label}: `;
+        item.append(labelText, value);
+        container.append(item);
+    }
+
+    // Adds a summary item for a number, or nothing when the report has no value for it.
+    function addNumberItem(container, label, value) {
+        if (typeof value === "number") {
+            addSummaryItem(container, label, value.toLocaleString());
+        }
+    }
+
+    // Adds a heading and a path list to container, or emptyText when there are no paths.
+    function appendPathSection(container, headingText, paths, noun, emptyText, open = true) {
+        const heading = document.createElement("h3");
+        heading.textContent = headingText;
+        if (paths.length === 0) {
+            const none = document.createElement("p");
+            none.className = "path-text";
+            none.textContent = emptyText;
+            container.append(heading, none);
+        } else {
+            container.append(heading, createPathList(paths, noun, open));
+        }
+    }
+
+    // Returns a collapsible list of asset paths, open when open is true; each path that is a plain asset can be
+    // selected in Unreal.
+    function createPathList(paths, noun, open = false) {
+        const list = document.createElement("details");
+        list.className = "path-list";
+        list.open = open;
+        const summary = document.createElement("summary");
+        summary.textContent = `${paths.length.toLocaleString()} ${paths.length === 1 ? noun : `${noun}s`}`;
+        const items = document.createElement("ul");
+        paths.forEach(objectPath => {
+            const item = document.createElement("li");
+            item.append(createPathLink(objectPath));
+            items.append(item);
+        });
+        list.append(summary, items);
+        return list;
+    }
+
+    // Returns a button showing label that selects the asset in Unreal, or plain text for paths the Content Browser
+    // cannot select. A label other than the path shows the full path in the tooltip.
+    function createPathLink(objectPath, label = objectPath) {
+        const asset = splitObjectPath(objectPath);
+        if (!asset) {
+            const text = document.createElement("span");
+            text.className = "path-text";
+            text.textContent = label;
+            return text;
+        }
+        const link = document.createElement("button");
+        link.type = "button";
+        link.className = "path-link";
+        link.textContent = label;
+        link.title = label === objectPath ? "Select in the Content Browser" : `${objectPath}\nSelect in the Content Browser`;
+        link.addEventListener("click", () => selectInUnreal(asset.packagePath, asset.assetName));
+        return link;
+    }
+
+    // Splits "/Game/Folder/Asset.Asset" into its package path and asset name. Returns null for
+    // sub-object paths such as level actors, which the Content Browser cannot select.
+    function splitObjectPath(objectPath) {
+        if (typeof objectPath !== "string" || objectPath.includes(":")) {
+            return null;
+        }
+        const lastSlash = objectPath.lastIndexOf("/");
+        if (lastSlash <= 0) {
+            return null;
+        }
+        const assetName = objectPath.substring(lastSlash + 1).split(".")[0];
+        return assetName ? { packagePath: objectPath.substring(0, lastSlash), assetName } : null;
+    }
+
+    function formatBytes(bytes) {
+        if (bytes < 1024) {
+            return `${bytes} B`;
+        }
+        if (bytes < 1024 * 1024) {
+            return `${(bytes / 1024).toFixed(1)} KB`;
+        }
+        return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    }
+
+    async function selectInUnreal(packagePath, assetName) {
         const requestUrl = new URL(reportBridgeUrl);
-        requestUrl.searchParams.set("packagePath", requestedAsset.packagePath);
-        requestUrl.searchParams.set("assetName", requestedAsset.assetName);
+        requestUrl.searchParams.set("packagePath", packagePath);
+        requestUrl.searchParams.set("assetName", assetName);
         requestUrl.searchParams.set("request", Date.now().toString());
 
         const abortController = new AbortController();
         const timeout = setTimeout(() => abortController.abort(), 2500);
-        showInContentBrowserButton.disabled = true;
         bridgeStatus.classList.remove("error");
         bridgeStatus.textContent = "Connecting to Unreal Editor…";
 
@@ -682,7 +793,7 @@
             if (!response.ok) {
                 throw new Error(message || `Unreal Editor returned ${response.status}.`);
             }
-            bridgeStatus.textContent = `${requestedAsset.assetName} selected in the Content Browser.`;
+            bridgeStatus.textContent = `${assetName} selected in the Content Browser.`;
         } catch (error) {
             bridgeStatus.classList.add("error");
             bridgeStatus.textContent = error instanceof Error &&
@@ -691,14 +802,11 @@
                 : "Unreal Editor is not open or the report bridge is unavailable.";
         } finally {
             clearTimeout(timeout);
-            if (selectedAsset === requestedAsset) {
-                showInContentBrowserButton.disabled = false;
-            }
         }
     }
 
     function metricValue(rawValue, type) {
-        const value = rawValue.trim();
+        const value = (rawValue ?? "").trim();
         if (value === "") {
             return null;
         }
@@ -707,10 +815,6 @@
         }
         const number = Number(value);
         return Number.isFinite(number) ? number : null;
-    }
-
-    function isSkeletalMeshRow(row) {
-        return (row.IsSkeletalMesh ?? "").trim().toLowerCase() === "true";
     }
 
     function getRowFilters() {

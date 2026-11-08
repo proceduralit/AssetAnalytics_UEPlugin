@@ -8,6 +8,7 @@
 #include "Core/AssetAnalyticsSettings.h"
 #include "Core/AssetAnalyticsUtilities.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Animation/MeshDeformer.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/SplineMeshComponent.h"
@@ -47,6 +48,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/PackagePath.h"
+#include "UObject/LinkerLoad.h"
 #include "Misc/Paths.h"
 #include "Policies/PrettyJsonPrintPolicy.h"
 #include "Serialization/JsonWriter.h"
@@ -82,17 +84,33 @@ namespace Material
 		Count
 	};
 
+	/** How the users of a vertex factory entry are found when the Asset Registry cannot list them. */
+	enum class EUnregisteredUserLookup : uint8
+	{
+		/** Loading Blueprint, Cascade particle system and skeletal mesh users can find them. */
+		Loading,
+		/** Users are actors placed in levels, which the report does not check. */
+		PlacedActors,
+		/** Users are Niagara systems, which the report does not load. */
+		Niagara,
+		/** The report has no way to find these users. */
+		NotChecked
+	};
+
 	/** One entry of the VertexFactories object in the JSON report. */
 	struct FVertexFactoryEntry
 	{
 		/** JSON key: the engine's EMaterialUsage name without MATUSAGE_, or a user type that has no usage flag. */
 		const TCHAR* Name;
 
-		/** Registry user type listed under this entry, or Count when its users are only known after loading. */
+		/** Registry user type listed under this entry, or Count when the registry cannot find its users. */
 		EMaterialUserType RegistryUserType;
 
 		/** Engine usage flag this entry reports as Enabled, or MATUSAGE_MAX for entries that are not usage flags. */
 		EMaterialUsage Usage;
+
+		/** How users are found when RegistryUserType is Count. Unused for registry entries. */
+		EUnregisteredUserLookup UnregisteredUserLookup = EUnregisteredUserLookup::NotChecked;
 	};
 
 	/**
@@ -102,18 +120,18 @@ namespace Material
 	static const FVertexFactoryEntry VertexFactoryEntries[] =
 	{
 		{ TEXT("SkeletalMesh"), EMaterialUserType::SkeletalMesh, MATUSAGE_SkeletalMesh },
-		{ TEXT("ParticleSprites"), EMaterialUserType::Count, MATUSAGE_ParticleSprites },
-		{ TEXT("BeamTrails"), EMaterialUserType::Count, MATUSAGE_BeamTrails },
-		{ TEXT("MeshParticles"), EMaterialUserType::Count, MATUSAGE_MeshParticles },
-		{ TEXT("StaticLighting"), EMaterialUserType::Count, MATUSAGE_StaticLighting },
-		{ TEXT("MorphTargets"), EMaterialUserType::Count, MATUSAGE_MorphTargets },
-		{ TEXT("SplineMesh"), EMaterialUserType::Count, MATUSAGE_SplineMesh },
+		{ TEXT("ParticleSprites"), EMaterialUserType::Count, MATUSAGE_ParticleSprites, EUnregisteredUserLookup::Loading },
+		{ TEXT("BeamTrails"), EMaterialUserType::Count, MATUSAGE_BeamTrails, EUnregisteredUserLookup::Loading },
+		{ TEXT("MeshParticles"), EMaterialUserType::Count, MATUSAGE_MeshParticles, EUnregisteredUserLookup::Loading },
+		{ TEXT("StaticLighting"), EMaterialUserType::Count, MATUSAGE_StaticLighting, EUnregisteredUserLookup::PlacedActors },
+		{ TEXT("MorphTargets"), EMaterialUserType::Count, MATUSAGE_MorphTargets, EUnregisteredUserLookup::Loading },
+		{ TEXT("SplineMesh"), EMaterialUserType::Count, MATUSAGE_SplineMesh, EUnregisteredUserLookup::Loading },
 		{ TEXT("InstancedStaticMeshes"), EMaterialUserType::InstancedStaticMeshes, MATUSAGE_InstancedStaticMeshes },
 		{ TEXT("GeometryCollections"), EMaterialUserType::GeometryCollections, MATUSAGE_GeometryCollections },
-		{ TEXT("Clothing"), EMaterialUserType::Count, MATUSAGE_Clothing },
-		{ TEXT("NiagaraSprites"), EMaterialUserType::Count, MATUSAGE_NiagaraSprites },
-		{ TEXT("NiagaraRibbons"), EMaterialUserType::Count, MATUSAGE_NiagaraRibbons },
-		{ TEXT("NiagaraMeshParticles"), EMaterialUserType::Count, MATUSAGE_NiagaraMeshParticles },
+		{ TEXT("Clothing"), EMaterialUserType::Count, MATUSAGE_Clothing, EUnregisteredUserLookup::Loading },
+		{ TEXT("NiagaraSprites"), EMaterialUserType::Count, MATUSAGE_NiagaraSprites, EUnregisteredUserLookup::Niagara },
+		{ TEXT("NiagaraRibbons"), EMaterialUserType::Count, MATUSAGE_NiagaraRibbons, EUnregisteredUserLookup::Niagara },
+		{ TEXT("NiagaraMeshParticles"), EMaterialUserType::Count, MATUSAGE_NiagaraMeshParticles, EUnregisteredUserLookup::Niagara },
 		{ TEXT("GeometryCache"), EMaterialUserType::GeometryCache, MATUSAGE_GeometryCache },
 		{ TEXT("Water"), EMaterialUserType::Water, MATUSAGE_Water },
 		{ TEXT("HairStrands"), EMaterialUserType::HairStrands, MATUSAGE_HairStrands },
@@ -126,7 +144,7 @@ namespace Material
 		{ TEXT("StaticMesh"), EMaterialUserType::StaticMesh, MATUSAGE_StaticMesh },
 		{ TEXT("EditorCompositing"), EMaterialUserType::Count, MATUSAGE_EditorCompositing },
 		{ TEXT("NeuralNetworks"), EMaterialUserType::Count, MATUSAGE_NeuralNetworks },
-		{ TEXT("MeshDeformer"), EMaterialUserType::Count, MATUSAGE_MeshDeformer },
+		{ TEXT("MeshDeformer"), EMaterialUserType::Count, MATUSAGE_MeshDeformer, EUnregisteredUserLookup::Loading },
 		{ TEXT("Niagara"), EMaterialUserType::Niagara, MATUSAGE_MAX },
 		{ TEXT("Particle"), EMaterialUserType::Particle, MATUSAGE_MAX },
 		{ TEXT("Level"), EMaterialUserType::Level, MATUSAGE_MAX },
@@ -144,17 +162,57 @@ namespace Material
 		FString Path;
 	};
 
-	/** One static switch of a master and how often its counted instances change it. */
-	struct FStaticSwitchSummary
+	/** Kinds of instance overrides that give an instance its own shader map. */
+	enum class EPermutationParameterKind : uint8
 	{
-		/** Identifies the switch, including its layer when it comes from a material layer. */
+		StaticSwitch,
+		ComponentMask,
+		BaseProperty
+	};
+
+	/** One static parameter or base property of a master and how its counted instances override it. */
+	struct FPermutationParameterSummary
+	{
+		/** Whether this is a static switch, a static component mask or a base property such as blend mode. */
+		EPermutationParameterKind Kind = EPermutationParameterKind::StaticSwitch;
+
+		/** Identifies the parameter, including its layer when it comes from a material layer. Base properties only set Name. */
 		FMaterialParameterInfo ParameterInfo;
 
-		/** Value the master uses when an instance does not override the switch. */
-		bool bDefaultValue = false;
+		/** Value the master uses when an instance does not override it, as report text. Empty for base properties other than the blend mode. */
+		FString DefaultValue;
 
-		/** Counted instances that override the switch with a value different from the default. */
+		/** Counted instances whose own override gives a value different from their parent's. */
 		int32 ChangedCount = 0;
+
+		/** Counted instances whose own override repeats the value they would inherit from their parent. */
+		int32 NoOpCount = 0;
+	};
+
+	/** A static parameter or base property of one instance that the instance overrides or that differs from the master. */
+	struct FInstancePermutationCell
+	{
+		/** Index of the parameter in FMaterialAssetData::PermutationParameters. */
+		int32 ParameterIndex = INDEX_NONE;
+
+		/** Value the instance ends up with, as report text. Base properties other than the blend mode only say whether they differ from the master. */
+		FString Value;
+
+		/** Whether the instance's own overrides set this parameter, rather than inheriting it from its parent. */
+		bool bOwnOverride = false;
+
+		/** Whether the instance's own override repeats the value it would inherit from its parent. */
+		bool bSameAsParent = false;
+	};
+
+	/** Static parameters of one counted instance. */
+	struct FInstancePermutationRow
+	{
+		/** Object path of the instance. */
+		FString Path;
+
+		/** Parameters the instance overrides or ends up with a value different from the master's. */
+		TArray<FInstancePermutationCell> Cells;
 	};
 
 	/** Everything the report gathers for one master material. */
@@ -193,22 +251,96 @@ namespace Material
 		/** Shaders the master and one instance per unique static permutation compile, from the engine's shader map layout. */
 		int32 LayoutShaderCount = INDEX_NONE;
 
-		/** Static switches of the master, with how many counted instances change them. */
-		TArray<FStaticSwitchSummary> StaticSwitches;
+		/** Static switches, component masks and base properties of the master, with how counted instances override them. */
+		TArray<FPermutationParameterSummary> PermutationParameters;
 
-		/** Distinct combinations of static parameters and base property overrides among the static permutation instances. */
-		int32 UniqueStaticPermutationCount = 0;
+		/** Static parameters of every loaded counted instance, sorted by path. */
+		TArray<FInstancePermutationRow> InstancePermutationRows;
 	};
 
-	/** Effective static parameters and base property overrides of one static permutation instance, used to group equal ones. */
+	/**
+	 * Effective static parameters and base property overrides of a material, used to group materials that compile
+	 * the same shader map. Matches what the engine puts in a material's shader map ID.
+	 */
 	struct FStaticPermutationKey
 	{
-		/** Static parameters the instance ends up with, including those inherited from parent instances. */
+		/** Static parameters the material ends up with, including inherited ones, with every bOverride cleared. */
 		FStaticParameterSet StaticParameters;
 
-		/** Hash of the instance's base property overrides, such as blend mode or two sided. */
+		/** Hash of the base properties that differ from the master's, such as blend mode or two sided; 0 when none do. */
 		uint64 BasePropertyOverridesHash = 0;
+
+		/** Returns whether Other compiles the same shader map as this key. */
+		bool CompilesSameShaders(const FStaticPermutationKey& Other) const
+		{
+			return BasePropertyOverridesHash == Other.BasePropertyOverridesHash &&
+				StaticParameters.Equivalent(Other.StaticParameters);
+		}
 	};
+
+	/** A base property an instance can override, read through UMaterialInterface so inherited values are included. */
+	struct FBasePropertyCheck
+	{
+		/** Property name shown in the report. */
+		const TCHAR* Name;
+
+		/** Returns whether the instance's own overrides set this property. */
+		bool (*IsOverridden)(const FMaterialInstanceBasePropertyOverrides& Overrides);
+
+		/** Returns whether the two materials end up with the same value for this property. */
+		bool (*HasSameValue)(const UMaterialInterface& Left, const UMaterialInterface& Right);
+	};
+
+	/** Compares two base property values the way UMaterialInstance::GetBasePropertyOverridesHash does. */
+	template <typename ValueType>
+	static bool HaveSameBasePropertyValue(const ValueType& Left, const ValueType& Right)
+	{
+		if constexpr (std::is_floating_point_v<ValueType>) return FMath::IsNearlyEqual(Left, Right);
+		else return !(Left != Right);
+	}
+
+#define ASSET_ANALYTICS_BASE_PROPERTY(Name, OverrideFlag, Getter) \
+	{ \
+		TEXT(Name), \
+		[](const FMaterialInstanceBasePropertyOverrides& Overrides) { return Overrides.OverrideFlag != 0; }, \
+		[](const UMaterialInterface& Left, const UMaterialInterface& Right) { return HaveSameBasePropertyValue(Left.Getter(), Right.Getter()); } \
+	}
+
+	/** The base properties UMaterialInstance::GetBasePropertyOverridesHash puts in a shader map ID, in the same order. */
+	static const FBasePropertyCheck BasePropertyChecks[] =
+	{
+		ASSET_ANALYTICS_BASE_PROPERTY("OpacityMaskClipValue", bOverride_OpacityMaskClipValue, GetOpacityMaskClipValue),
+		ASSET_ANALYTICS_BASE_PROPERTY("BlendMode", bOverride_BlendMode, GetBlendMode),
+		ASSET_ANALYTICS_BASE_PROPERTY("ShadingModel", bOverride_ShadingModel, GetShadingModels),
+		ASSET_ANALYTICS_BASE_PROPERTY("TwoSided", bOverride_TwoSided, IsTwoSided),
+		ASSET_ANALYTICS_BASE_PROPERTY("ThinSurface", bOverride_bIsThinSurface, IsThinSurface),
+		ASSET_ANALYTICS_BASE_PROPERTY("DitheredLODTransition", bOverride_DitheredLODTransition, IsDitheredLODTransition),
+		ASSET_ANALYTICS_BASE_PROPERTY("CastDynamicShadowAsMasked", bOverride_CastDynamicShadowAsMasked, GetCastDynamicShadowAsMasked),
+		ASSET_ANALYTICS_BASE_PROPERTY("OutputTranslucentVelocity", bOverride_OutputTranslucentVelocity, IsTranslucencyWritingVelocity),
+		ASSET_ANALYTICS_BASE_PROPERTY("HasPixelAnimation", bOverride_bHasPixelAnimation, HasPixelAnimation),
+		ASSET_ANALYTICS_BASE_PROPERTY("EnableTessellation", bOverride_bEnableTessellation, IsTessellationEnabled),
+		ASSET_ANALYTICS_BASE_PROPERTY("DisplacementScaling", bOverride_DisplacementScaling, GetDisplacementScaling),
+		ASSET_ANALYTICS_BASE_PROPERTY("EnableDisplacementFade", bOverride_bEnableDisplacementFade, IsDisplacementFadeEnabled),
+		ASSET_ANALYTICS_BASE_PROPERTY("DisplacementFadeRange", bOverride_DisplacementFadeRange, GetDisplacementFadeRange),
+		ASSET_ANALYTICS_BASE_PROPERTY("MaxWorldPositionOffsetDisplacement", bOverride_MaxWorldPositionOffsetDisplacement, GetMaxWorldPositionOffsetDisplacement),
+		ASSET_ANALYTICS_BASE_PROPERTY("CompatibleWithLumenCardSharing", bOverride_CompatibleWithLumenCardSharing, IsCompatibleWithLumenCardSharing),
+		ASSET_ANALYTICS_BASE_PROPERTY("UsageFlags", bOverride_UsageFlags, GetUsageFlags),
+	};
+
+	/**
+	 * Returns the value of a base property as report text, such as "Masked" for the blend mode.
+	 * Returns an empty string for properties the report only shows as changed or not.
+	 */
+	static FString GetBasePropertyValueText(const FBasePropertyCheck& BaseProperty, const UMaterialInterface& Material)
+	{
+		if (FCString::Strcmp(BaseProperty.Name, TEXT("BlendMode")) == 0)
+		{
+			return StaticEnum<EBlendMode>()->GetDisplayNameTextByValue(Material.GetBlendMode()).ToString();
+		}
+		return FString();
+	}
+
+#undef ASSET_ANALYTICS_BASE_PROPERTY
 
 	/**
 	 * Counts the shader maps Material compiles across quality levels on ShaderPlatform when cooking: one per quality
@@ -429,7 +561,7 @@ namespace Material
 
 	/**
 	 * Returns the usage flag a component needs for the materials it draws.
-	 * Returns: MATUSAGE_MAX for component types this report does not recognise.
+	 * Returns: MATUSAGE_MAX for component types this report does not recognize.
 	 */
 	static EMaterialUsage GetComponentUsage(const UPrimitiveComponent& Component)
 	{
@@ -556,6 +688,93 @@ namespace Material
 		if (SkeletalMesh.HasActiveClothingAssets()) Uses.Add({ MATUSAGE_Clothing, {} });
 		if (SkeletalMesh.GetDefaultMeshDeformer() != nullptr) Uses.Add({ MATUSAGE_MeshDeformer, {} });
 		return Uses;
+	}
+
+	/**
+	 * Reads the package header at PackageName, without creating any of its objects, and checks whether one of its
+	 * objects has the class named ClassName.
+	 * Input: The package must have no objects or open header in memory, so the header is not shared with a loaded
+	 * or loading package.
+	 * Output: bOutFound says whether such an object exists. The header is closed again; the empty package object
+	 * it leaves is unloaded with the batch's other packages.
+	 * Returns: False when the header cannot be read.
+	 */
+	static bool TryFindPackageObjectOfClass(const FName PackageName, const FName ClassName, bool& bOutFound)
+	{
+		FPackagePath PackagePath;
+		if (!FPackagePath::TryFromPackageName(PackageName, PackagePath)) return false;
+		FLinkerLoad* Linker = GetPackageLinker(nullptr, PackagePath, LOAD_NoVerify | LOAD_Quiet | LOAD_NoWarn, nullptr);
+		if (Linker == nullptr) return false;
+
+		bOutFound = Linker->ExportMap.ContainsByPredicate([Linker, ClassName](const FObjectExport& Export)
+		{
+			return !Export.ClassIndex.IsNull() && Linker->ImpExp(Export.ClassIndex).ObjectName == ClassName;
+		});
+		ResetLoaders(Linker->LinkerRoot);
+		return true;
+	}
+
+	/** Returns whether the package at PackageName hard-references a mesh deformer asset, such as a Deformer Graph. */
+	static bool HasMeshDeformerDependency(IAssetRegistry& AssetRegistry, const FName PackageName)
+	{
+		TSet<FTopLevelAssetPath> DeformerClasses;
+		AssetRegistry.GetDerivedClassNames({ UMeshDeformer::StaticClass()->GetClassPathName() }, {}, DeformerClasses);
+
+		TArray<FName> Dependencies;
+		AssetRegistry.GetDependencies(
+			PackageName,
+			Dependencies,
+			UE::AssetRegistry::EDependencyCategory::Package,
+			UE::AssetRegistry::FDependencyQuery(UE::AssetRegistry::EDependencyQuery::Hard));
+		for (const FName Dependency : Dependencies)
+		{
+			TArray<FAssetData> DependencyAssets;
+			AssetRegistry.GetAssetsByPackageName(Dependency, DependencyAssets);
+			for (const FAssetData& DependencyAsset : DependencyAssets)
+			{
+				if (DeformerClasses.Contains(DependencyAsset.AssetClassPath)) return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Finds the same uses as FindSkeletalMeshUses for a skeletal mesh that is not loaded, without loading it, so
+	 * its render data, skeleton, physics asset, materials and textures stay on disk. Morph targets come from the
+	 * Asset Registry tag, the mesh deformer from the mesh's dependencies, and clothing from its package header.
+	 * Clothing assets count even when no mesh section uses them, unlike USkeletalMesh::HasActiveClothingAssets.
+	 * Output: Fills OutUses when it returns true.
+	 * Returns: False when the asset is not an unloaded skeletal mesh or its data cannot be read this way, so the
+	 * caller loads it instead.
+	 */
+	static bool TryFindUnloadedSkeletalMeshUses(IAssetRegistry& AssetRegistry, const FSoftObjectPath& UserPath, TArray<FMaterialUse>& OutUses)
+	{
+		const FAssetData UserData = AssetRegistry.GetAssetByObjectPath(UserPath);
+		if (!UserData.IsValid() || UserData.AssetClassPath != USkeletalMesh::StaticClass()->GetClassPathName()) return false;
+		// Packages saved before the tag existed, or already in memory, are left to the loading path.
+		int32 MorphTargetCount = 0;
+		if (!UserData.GetTagValue(TEXT("MorphTargets"), MorphTargetCount)) return false;
+		if (IsAsyncLoading()) return false;
+		if (UPackage* ExistingPackage = FindPackage(nullptr, *UserData.PackageName.ToString()))
+		{
+			// An empty package left by an earlier header read can be read again; a package with objects cannot.
+			bool bHasObjects = false;
+			ForEachObjectWithPackage(ExistingPackage, [&bHasObjects](UObject*)
+			{
+				bHasObjects = true;
+				return false;
+			}, EGetObjectsFlags::None);
+			if (bHasObjects || ExistingPackage->GetLinker() != nullptr) return false;
+		}
+
+		bool bHasClothing = false;
+		if (!TryFindPackageObjectOfClass(UserData.PackageName, TEXT("ClothingAssetCommon"), bHasClothing)) return false;
+
+		OutUses.Reset();
+		if (MorphTargetCount > 0) OutUses.Add({ MATUSAGE_MorphTargets, {} });
+		if (bHasClothing) OutUses.Add({ MATUSAGE_Clothing, {} });
+		if (HasMeshDeformerDependency(AssetRegistry, UserData.PackageName)) OutUses.Add({ MATUSAGE_MeshDeformer, {} });
+		return true;
 	}
 
 	/** Gathers the Material Analytics report over several editor ticks and saves it when done. */
@@ -814,11 +1033,166 @@ namespace Material
 		}
 
 		/**
+		 * Builds the shader map key of Material: its effective static parameters with every bOverride cleared, as
+		 * FMaterialShaderMapId::UpdateFromParameterSet does, so an inherited value and an overridden equal value match.
+		 */
+		static FStaticPermutationKey MakePermutationKey(UMaterialInterface& Material, const uint64 BasePropertyOverridesHash)
+		{
+			FStaticPermutationKey Key;
+			Material.GetStaticParameterValues(Key.StaticParameters);
+			for (FStaticSwitchParameter& SwitchParameter : Key.StaticParameters.StaticSwitchParameters)
+			{
+				SwitchParameter.bOverride = false;
+			}
+			for (FStaticComponentMaskParameter& MaskParameter : Key.StaticParameters.EditorOnly.StaticComponentMaskParameters)
+			{
+				MaskParameter.bOverride = false;
+			}
+			Key.BasePropertyOverridesHash = BasePropertyOverridesHash;
+			return Key;
+		}
+
+		/** Returns mask channels as report text, such as "R_B_" for red and blue. */
+		static FString FormatComponentMask(const bool bR, const bool bG, const bool bB, const bool bA)
+		{
+			return FString::Printf(TEXT("%s%s%s%s"), bR ? TEXT("R") : TEXT("_"), bG ? TEXT("G") : TEXT("_"), bB ? TEXT("B") : TEXT("_"), bA ? TEXT("A") : TEXT("_"));
+		}
+
+		/**
+		 * Lists the master's static switches, static component masks and overridable base properties with their
+		 * defaults, ready for instance overrides to be counted against them.
+		 * Output: Fills Item.PermutationParameters.
+		 */
+		static void AddPermutationParameters(const UMaterial& MasterMaterial, FMaterialAssetData& Item)
+		{
+			TArray<FMaterialParameterInfo> ParameterInfos;
+			TArray<FGuid> ParameterGuids;
+			MasterMaterial.GetAllParameterInfoOfType(EMaterialParameterType::StaticSwitch, ParameterInfos, ParameterGuids);
+			for (const FMaterialParameterInfo& SwitchInfo : ParameterInfos)
+			{
+				FPermutationParameterSummary& Summary = Item.PermutationParameters.AddDefaulted_GetRef();
+				Summary.Kind = EPermutationParameterKind::StaticSwitch;
+				Summary.ParameterInfo = SwitchInfo;
+				bool bDefaultValue = false;
+				FGuid DefaultExpressionGuid;
+				MasterMaterial.GetStaticSwitchParameterDefaultValue(FHashedMaterialParameterInfo(SwitchInfo), bDefaultValue, DefaultExpressionGuid);
+				Summary.DefaultValue = bDefaultValue ? TEXT("True") : TEXT("False");
+			}
+
+			ParameterInfos.Reset();
+			ParameterGuids.Reset();
+			MasterMaterial.GetAllParameterInfoOfType(EMaterialParameterType::StaticComponentMask, ParameterInfos, ParameterGuids);
+			for (const FMaterialParameterInfo& MaskInfo : ParameterInfos)
+			{
+				FPermutationParameterSummary& Summary = Item.PermutationParameters.AddDefaulted_GetRef();
+				Summary.Kind = EPermutationParameterKind::ComponentMask;
+				Summary.ParameterInfo = MaskInfo;
+				bool bR = false, bG = false, bB = false, bA = false;
+				FGuid DefaultExpressionGuid;
+				MasterMaterial.GetStaticComponentMaskParameterDefaultValue(FHashedMaterialParameterInfo(MaskInfo), bR, bG, bB, bA, DefaultExpressionGuid);
+				Summary.DefaultValue = FormatComponentMask(bR, bG, bB, bA);
+			}
+
+			for (const FBasePropertyCheck& BaseProperty : BasePropertyChecks)
+			{
+				FPermutationParameterSummary& Summary = Item.PermutationParameters.AddDefaulted_GetRef();
+				Summary.Kind = EPermutationParameterKind::BaseProperty;
+				Summary.ParameterInfo.Name = BaseProperty.Name;
+				Summary.DefaultValue = GetBasePropertyValueText(BaseProperty, MasterMaterial);
+			}
+		}
+
+		/**
+		 * Compares the instance's static parameters and base properties with the master and its parent. Overrides
+		 * inherited from a parent instance are counted on that parent, so each override is counted once.
+		 * Input: Instance must be loaded and have a parent. InstanceKey is the instance's shader map key, which holds
+		 * the static parameter values it ends up with.
+		 * Output: Increases ChangedCount for own overrides that differ from the parent's value, including ones that
+		 * restore the master's value, and NoOpCount for own overrides that repeat the parent's value. Adds a cell to
+		 * Row for each parameter the instance overrides, or inherits with a value different from the master's.
+		 */
+		static void ReadInstancePermutationCells(
+			const UMaterial& MasterMaterial,
+			const UMaterialInstance& Instance,
+			const FStaticPermutationKey& InstanceKey,
+			FMaterialAssetData& Item,
+			FInstancePermutationRow& Row)
+		{
+			const UMaterialInterface& Parent = *Instance.Parent;
+			const FStaticParameterSet& OwnStaticParameters = Instance.GetStaticParameters();
+			auto FindParameterIndex = [&Item](const EPermutationParameterKind Kind, const FMaterialParameterInfo& ParameterInfo)
+			{
+				return Item.PermutationParameters.IndexOfByPredicate([Kind, &ParameterInfo](const FPermutationParameterSummary& Candidate)
+				{
+					return Candidate.Kind == Kind && Candidate.ParameterInfo == ParameterInfo;
+				});
+			};
+			auto AddCell = [&Item, &Row](const int32 ParameterIndex, const FString& Value, const bool bOwnOverride, const bool bDiffersFromMaster, const bool bSameAsParent)
+			{
+				if (ParameterIndex == INDEX_NONE) return;
+				FPermutationParameterSummary& Summary = Item.PermutationParameters[ParameterIndex];
+				if (bOwnOverride && !bSameAsParent) ++Summary.ChangedCount;
+				if (bOwnOverride && bSameAsParent) ++Summary.NoOpCount;
+				// Inherited parameters with the master's value need no cell; the report shows them with the master's default.
+				if (!bOwnOverride && !bDiffersFromMaster) return;
+				FInstancePermutationCell& Cell = Row.Cells.AddDefaulted_GetRef();
+				Cell.ParameterIndex = ParameterIndex;
+				Cell.Value = Value;
+				Cell.bOwnOverride = bOwnOverride;
+				Cell.bSameAsParent = bOwnOverride && bSameAsParent;
+			};
+
+			for (const FStaticSwitchParameter& SwitchParameter : InstanceKey.StaticParameters.StaticSwitchParameters)
+			{
+				const int32 ParameterIndex = FindParameterIndex(EPermutationParameterKind::StaticSwitch, SwitchParameter.ParameterInfo);
+				const FString ValueText = SwitchParameter.Value ? TEXT("True") : TEXT("False");
+				const bool bOwnOverride = OwnStaticParameters.StaticSwitchParameters.ContainsByPredicate([&SwitchParameter](const FStaticSwitchParameter& OwnParameter)
+				{
+					return OwnParameter.bOverride && OwnParameter.ParameterInfo == SwitchParameter.ParameterInfo;
+				});
+				FMaterialParameterMetadata ParentValue;
+				const bool bSameAsParent =
+					Parent.GetParameterValue(EMaterialParameterType::StaticSwitch, SwitchParameter.ParameterInfo, ParentValue) &&
+					ParentValue.Value.AsStaticSwitch() == SwitchParameter.Value;
+				const bool bDiffersFromMaster = ParameterIndex != INDEX_NONE && Item.PermutationParameters[ParameterIndex].DefaultValue != ValueText;
+				AddCell(ParameterIndex, ValueText, bOwnOverride, bDiffersFromMaster, bSameAsParent);
+			}
+			for (const FStaticComponentMaskParameter& MaskParameter : InstanceKey.StaticParameters.EditorOnly.StaticComponentMaskParameters)
+			{
+				const int32 ParameterIndex = FindParameterIndex(EPermutationParameterKind::ComponentMask, MaskParameter.ParameterInfo);
+				const FString MaskText = FormatComponentMask(MaskParameter.R, MaskParameter.G, MaskParameter.B, MaskParameter.A);
+				const bool bOwnOverride = OwnStaticParameters.EditorOnly.StaticComponentMaskParameters.ContainsByPredicate([&MaskParameter](const FStaticComponentMaskParameter& OwnParameter)
+				{
+					return OwnParameter.bOverride && OwnParameter.ParameterInfo == MaskParameter.ParameterInfo;
+				});
+				FMaterialParameterMetadata ParentValue;
+				const bool bSameAsParent =
+					Parent.GetParameterValue(EMaterialParameterType::StaticComponentMask, MaskParameter.ParameterInfo, ParentValue) &&
+					FormatComponentMask(ParentValue.Value.Bool[0], ParentValue.Value.Bool[1], ParentValue.Value.Bool[2], ParentValue.Value.Bool[3]) == MaskText;
+				const bool bDiffersFromMaster = ParameterIndex != INDEX_NONE && Item.PermutationParameters[ParameterIndex].DefaultValue != MaskText;
+				AddCell(ParameterIndex, MaskText, bOwnOverride, bDiffersFromMaster, bSameAsParent);
+			}
+			for (const FBasePropertyCheck& BaseProperty : BasePropertyChecks)
+			{
+				FMaterialParameterInfo PropertyInfo;
+				PropertyInfo.Name = BaseProperty.Name;
+				const bool bDiffersFromMaster = !BaseProperty.HasSameValue(Instance, MasterMaterial);
+				const FString ValueText = GetBasePropertyValueText(BaseProperty, Instance);
+				AddCell(
+					FindParameterIndex(EPermutationParameterKind::BaseProperty, PropertyInfo),
+					!ValueText.IsEmpty() ? ValueText : bDiffersFromMaster ? TEXT("Changed") : TEXT("Master's"),
+					BaseProperty.IsOverridden(Instance.BasePropertyOverrides),
+					bDiffersFromMaster,
+					BaseProperty.HasSameValue(Instance, Parent));
+			}
+		}
+
+		/**
 		 * Loads a master and its counted instances to read their static permutations on the editor's shader platform.
-		 * Instances that override static parameters or base properties compile their own shader map. Instances with
-		 * equal effective overrides compile the same shaders, so the layout shader count is taken once per unique
-		 * permutation, repeated for each of that instance's quality shader maps.
-		 * Output: Fills Item.StaticSwitches, StaticPermutationInstancePaths, UniqueStaticPermutationCount and
+		 * Instances that override static parameters or base properties compile their own shader map. Instances whose
+		 * shader map key matches the master's or another instance's compile the same shaders, so the layout shader
+		 * count is taken once per unique permutation, repeated for each of that instance's quality shader maps.
+		 * Output: Fills Item.PermutationParameters, InstancePermutationRows, StaticPermutationInstancePaths and
 		 * LayoutShaderCount, and sets Item.bShaderPermutationsRead.
 		 * Returns: The number of materials loaded from disk.
 		 */
@@ -839,20 +1213,10 @@ namespace Material
 			const ITargetPlatform* CookedPlatform = GetTargetPlatformManagerRef().FindTargetPlatform(FPlatformProperties::IniPlatformName());
 			int32 LayoutShaderCount = CountLayoutShaders(*MasterMaterial, ShaderPlatform, CookedPlatform, 1);
 
-			TArray<FMaterialParameterInfo> SwitchInfos;
-			TArray<FGuid> SwitchGuids;
-			MasterMaterial->GetAllParameterInfoOfType(EMaterialParameterType::StaticSwitch, SwitchInfos, SwitchGuids);
-			for (const FMaterialParameterInfo& SwitchInfo : SwitchInfos)
-			{
-				FStaticSwitchSummary& Summary = Item.StaticSwitches.AddDefaulted_GetRef();
-				Summary.ParameterInfo = SwitchInfo;
-				FGuid DefaultExpressionGuid;
-				MasterMaterial->GetStaticSwitchParameterDefaultValue(
-					FHashedMaterialParameterInfo(SwitchInfo),
-					Summary.bDefaultValue,
-					DefaultExpressionGuid);
-			}
+			AddPermutationParameters(*MasterMaterial, Item);
 
+			// The master's base properties are its own, so its base property hash is 0, as for instances that change none.
+			const FStaticPermutationKey MasterKey = MakePermutationKey(*MasterMaterial, 0);
 			TArray<FStaticPermutationKey> PermutationKeys;
 			for (const FAssetData& InstanceData : Item.Instances)
 			{
@@ -865,43 +1229,37 @@ namespace Material
 				}
 				if (!bWasAssetLoaded) ++LoadedAssetCount;
 
-				// Only the instance's own overrides count; overrides inherited from a parent instance are counted there.
-				for (const FStaticSwitchParameter& SwitchParameter : Instance->GetStaticParameters().StaticSwitchParameters)
-				{
-					if (!SwitchParameter.bOverride) continue;
-					FStaticSwitchSummary* Summary = Item.StaticSwitches.FindByPredicate(
-						[&SwitchParameter](const FStaticSwitchSummary& Candidate)
-						{
-							return Candidate.ParameterInfo == SwitchParameter.ParameterInfo;
-						});
-					if (Summary != nullptr && SwitchParameter.Value != Summary->bDefaultValue) ++Summary->ChangedCount;
-				}
+				FStaticPermutationKey Key = MakePermutationKey(*Instance, Instance->GetBasePropertyOverridesHash());
+				FInstancePermutationRow& Row = Item.InstancePermutationRows.AddDefaulted_GetRef();
+				Row.Path = InstanceData.GetObjectPathString();
+				if (Instance->Parent != nullptr) ReadInstancePermutationCells(*MasterMaterial, *Instance, Key, Item, Row);
 
 				if (!Instance->bHasStaticPermutationResource) continue;
 
 				Item.StaticPermutationInstancePaths.Add(InstanceData.GetObjectPathString());
-				// Instances with equal effective static parameters and base property overrides compile the same shaders.
-				FStaticPermutationKey Key;
-				Instance->GetStaticParameterValues(Key.StaticParameters);
-				Key.BasePropertyOverridesHash = Instance->GetBasePropertyOverridesHash();
-				const bool bAlreadySeen = PermutationKeys.ContainsByPredicate([&Key](const FStaticPermutationKey& SeenKey)
-				{
-					return SeenKey.BasePropertyOverridesHash == Key.BasePropertyOverridesHash &&
-						SeenKey.StaticParameters.Equivalent(Key.StaticParameters);
-				});
-				if (!bAlreadySeen)
-				{
-					PermutationKeys.Add(MoveTemp(Key));
-					// The layout only covers the instance's active quality level, so it is repeated for each quality shader map.
-					// GetShaderTypes asserts that static permutation instances are constant instances.
-					if (Instance->IsA<UMaterialInstanceConstant>())
+				// Instances whose key matches the master's or an earlier instance's share that shader map.
+				const bool bAlreadySeen = MasterKey.CompilesSameShaders(Key) ||
+					PermutationKeys.ContainsByPredicate([&Key](const FStaticPermutationKey& SeenKey)
 					{
-						const int32 InstanceShaderMapCount = CountQualityShaderMaps(*Instance, ShaderPlatform);
-						LayoutShaderCount += CountLayoutShaders(*Instance, ShaderPlatform, CookedPlatform, InstanceShaderMapCount);
-					}
+						return SeenKey.CompilesSameShaders(Key);
+					});
+				if (bAlreadySeen) continue;
+
+				PermutationKeys.Add(MoveTemp(Key));
+				// The layout only covers the instance's active quality level, so it is repeated for each quality shader map.
+				// GetShaderTypes asserts that static permutation instances are constant instances.
+				if (Instance->IsA<UMaterialInstanceConstant>())
+				{
+					const int32 InstanceShaderMapCount = CountQualityShaderMaps(*Instance, ShaderPlatform);
+					LayoutShaderCount += CountLayoutShaders(*Instance, ShaderPlatform, CookedPlatform, InstanceShaderMapCount);
 				}
 			}
-			Item.UniqueStaticPermutationCount = PermutationKeys.Num();
+
+			Item.InstancePermutationRows.Sort([](const FInstancePermutationRow& Left, const FInstancePermutationRow& Right)
+			{
+				return Left.Path < Right.Path;
+			});
+
 			Item.StaticPermutationInstancePaths.Sort();
 			Item.LayoutShaderCount = LayoutShaderCount;
 			Item.bShaderPermutationsRead = true;
@@ -932,7 +1290,8 @@ namespace Material
 		}
 
 		/**
-		 * Returns the material uses of the user at UserPath, loading it the first time it is needed in this run.
+		 * Returns the material uses of the user at UserPath, reading it the first time it is needed in this run.
+		 * Skeletal meshes that are not loaded are read without loading them; other users are loaded.
 		 * Output: Increases LoadedAssetCount when this call loaded the user from disk.
 		 */
 		const TArray<FMaterialUse>& GetUserUses(const FString& UserPath, int32& LoadedAssetCount)
@@ -943,6 +1302,11 @@ namespace Material
 			UObject* User = UserObjectPath.ResolveObject();
 			if (User == nullptr)
 			{
+				TArray<FMaterialUse> SkeletalMeshUses;
+				if (TryFindUnloadedSkeletalMeshUses(IAssetRegistry::GetChecked(), UserObjectPath, SkeletalMeshUses))
+				{
+					return UsesByUserPath.Add(UserPath, MoveTemp(SkeletalMeshUses));
+				}
 				User = UserObjectPath.TryLoad();
 				if (User != nullptr) ++LoadedAssetCount;
 			}
@@ -956,8 +1320,9 @@ namespace Material
 		}
 
 		/**
-		 * Loads the Blueprint, Cascade particle system and skeletal mesh users of a material and files each one
-		 * under the usage flags it needs. Blueprints and particle systems whose uses of this material are all
+		 * Reads the Blueprint, Cascade particle system and skeletal mesh users of a material and files each one
+		 * under the usage flags it needs. Blueprints and particle systems are loaded; skeletal meshes are read
+		 * without loading when possible (see GetUserUses). Blueprints and particle systems whose uses of this material are all
 		 * recognised are removed from their broad group; skeletal meshes stay under SkeletalMesh.
 		 * Input: MaterialAndInstances is the master and its counted instances.
 		 * Returns: The number of users loaded from disk.
@@ -1226,6 +1591,18 @@ namespace Material
 			ResetReportData();
 		}
 
+		/** Returns the JSON name of a permutation parameter kind. */
+		static const TCHAR* GetPermutationParameterKindName(const EPermutationParameterKind Kind)
+		{
+			switch (Kind)
+			{
+			case EPermutationParameterKind::StaticSwitch: return TEXT("StaticSwitch");
+			case EPermutationParameterKind::ComponentMask: return TEXT("ComponentMask");
+			case EPermutationParameterKind::BaseProperty: return TEXT("BaseProperty");
+			}
+			return TEXT("Unknown");
+		}
+
 		/**
 		 * Writes one material entry with the enabled fields.
 		 * Output: Appends a JSON object to Writer, which must be inside the Materials array.
@@ -1260,19 +1637,21 @@ namespace Material
 			}
 			if (Item.bShaderPermutationsRead)
 			{
-				Writer.WriteValue(TEXT("UniqueStaticPermutations"), Item.UniqueStaticPermutationCount);
 				// Shaders of the master and one instance per unique static permutation, on the editor's shader platform
 				// with the cooked game's permutations.
 				Writer.WriteValue(TEXT("ShaderCount"), Item.LayoutShaderCount);
 
-				// ChangedCount: counted instances overriding the switch with the value opposite to its default.
-				Writer.WriteArrayStart(TEXT("StaticSwitches"));
-				for (const FStaticSwitchSummary& StaticSwitch : Item.StaticSwitches)
+				// ChangedCount: counted instances whose own override differs from their parent.
+				// NoOpCount: counted instances whose own override repeats the value inherited from their parent.
+				Writer.WriteArrayStart(TEXT("PermutationParameters"));
+				for (const FPermutationParameterSummary& Parameter : Item.PermutationParameters)
 				{
 					Writer.WriteObjectStart();
-					Writer.WriteValue(TEXT("Name"), StaticSwitch.ParameterInfo.Name.ToString());
-					Writer.WriteValue(TEXT("Default"), StaticSwitch.bDefaultValue);
-					Writer.WriteValue(TEXT("ChangedCount"), StaticSwitch.ChangedCount);
+					Writer.WriteValue(TEXT("Kind"), GetPermutationParameterKindName(Parameter.Kind));
+					Writer.WriteValue(TEXT("Name"), Parameter.ParameterInfo.Name.ToString());
+					if (!Parameter.DefaultValue.IsEmpty()) Writer.WriteValue(TEXT("Default"), Parameter.DefaultValue);
+					Writer.WriteValue(TEXT("ChangedCount"), Parameter.ChangedCount);
+					Writer.WriteValue(TEXT("NoOpCount"), Parameter.NoOpCount);
 					Writer.WriteObjectEnd();
 				}
 				Writer.WriteArrayEnd();
@@ -1280,6 +1659,32 @@ namespace Material
 				for (const FString& InstancePath : Item.StaticPermutationInstancePaths)
 				{
 					Writer.WriteValue(InstancePath);
+				}
+				Writer.WriteArrayEnd();
+
+				// Cells: parameters the instance overrides or inherits with a value different from the master's.
+				// Parameter is an index into PermutationParameters. State is SameAsParent for an own override that
+				// repeats the parent's value, Changed for an own override that differs from the parent's value, and
+				// Inherited for a value different from the master's that comes from a parent instance.
+				Writer.WriteArrayStart(TEXT("InstancePermutations"));
+				for (const FInstancePermutationRow& Row : Item.InstancePermutationRows)
+				{
+					Writer.WriteObjectStart();
+					Writer.WriteValue(TEXT("Path"), Row.Path);
+					Writer.WriteArrayStart(TEXT("Cells"));
+					for (const FInstancePermutationCell& Cell : Row.Cells)
+					{
+						const TCHAR* State = Cell.bSameAsParent ? TEXT("SameAsParent")
+							: Cell.bOwnOverride ? TEXT("Changed")
+							: TEXT("Inherited");
+						Writer.WriteObjectStart();
+						Writer.WriteValue(TEXT("Parameter"), Cell.ParameterIndex);
+						Writer.WriteValue(TEXT("Value"), Cell.Value);
+						Writer.WriteValue(TEXT("State"), State);
+						Writer.WriteObjectEnd();
+					}
+					Writer.WriteArrayEnd();
+					Writer.WriteObjectEnd();
 				}
 				Writer.WriteArrayEnd();
 			}
@@ -1296,9 +1701,28 @@ namespace Material
 		}
 
 		/**
+		 * Returns why the users of Entry are unknown, as the JSON UsersUnknownReason value.
+		 * Input: Entry has no Users list in Item.
+		 */
+		static const TCHAR* GetUsersUnknownReason(const FVertexFactoryEntry& Entry, const FMaterialAssetData& Item)
+		{
+			// Users were not gathered at all, so even registry users are unknown.
+			if (Item.UserPathsByType.Num() == 0) return TEXT("UsersNotGathered");
+			switch (Entry.UnregisteredUserLookup)
+			{
+			case EUnregisteredUserLookup::Loading:
+				return Item.ResolvedUserPathsByUsage.Num() > 0 ? TEXT("NoneFoundByLoading") : TEXT("LoadingOff");
+			case EUnregisteredUserLookup::PlacedActors: return TEXT("PlacedActors");
+			case EUnregisteredUserLookup::Niagara: return TEXT("Niagara");
+			case EUnregisteredUserLookup::NotChecked: return TEXT("NotChecked");
+			}
+			return TEXT("NotChecked");
+		}
+
+		/**
 		 * Writes one VertexFactories entry when it has something to show: users, or an enabled usage flag.
-		 * Users is written only when the registry can find users of this type, so an empty list means "enabled
-		 * but unused" and a missing Users key means the users are unknown without loading them.
+		 * Users is written only when the users are known, so an empty list means "enabled but unused". Otherwise
+		 * UsersUnknownReason says why they are unknown.
 		 * Output: Appends Entry.Name and its object to Writer, or nothing when the entry is skipped.
 		 */
 		static void WriteVertexFactoryJson(
@@ -1336,6 +1760,13 @@ namespace Material
 					Writer.WriteValue(UserPath);
 				}
 				Writer.WriteArrayEnd();
+			}
+			else
+			{
+				// UsersNotGathered: Vertex Factory Counts was off. LoadingOff: Vertex Factory Users was off.
+				// NoneFoundByLoading: loaded users found none, but levels were not checked. PlacedActors, Niagara
+				// and NotChecked: the report cannot find these users.
+				Writer.WriteValue(TEXT("UsersUnknownReason"), GetUsersUnknownReason(Entry, Item));
 			}
 			Writer.WriteObjectEnd();
 		}

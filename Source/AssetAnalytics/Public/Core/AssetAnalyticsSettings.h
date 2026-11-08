@@ -53,11 +53,11 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
 	bool bPackageDiskSize = true;
 
-	/** Includes the LOD count in the generated CSV. */
+	/** Includes the LOD count in the Mesh Analytics report. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
 	bool bLODCount = true;
 
-	/** Includes the static mesh LOD group in the generated CSV. */
+	/** Includes the static mesh LOD group in the Mesh Analytics report. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
 	bool bLODGroup = true;
 
@@ -65,7 +65,7 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
 	bool bCollisionInfo = true;
 
-	/** Includes the LOD 0 triangle count in the generated CSV. */
+	/** Includes the LOD 0 triangle count in the Mesh Analytics report. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
 	bool bTriangleCount = true;
 
@@ -73,36 +73,36 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Nanite Info"))
 	bool bNaniteInfo = true;
 
-	/** Includes the material count in the generated CSV. */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Material Count (Needs Asset Loading for Skeletal Meshes)"))
+	/** Includes the material slot count and the materials the mesh references. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Material Count (Loads Skeletal Meshes)"))
 	bool bMaterialCount = true;
 
-	/** Includes the UV channel count in the generated CSV. */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "UV Channel Count (Needs Asset Loading for Skeletal Meshes)"))
+	/** Includes the UV channel count in the Mesh Analytics report. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "UV Channel Count (Loads Skeletal Meshes)"))
 	bool bUVChannelCount = true;
 
-	/** Includes the maximum bounds length in the generated CSV. */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Max Bounds Length (Needs Asset Loading for Skeletal Meshes)"))
+	/** Includes the maximum bounds length in the Mesh Analytics report. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Max Bounds Length (Loads Skeletal Meshes)"))
 	bool bMaxBoundsLength = true;
 
-	/** Includes the estimated physics resource size in megabytes. */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Physics Size (Loads Assets Missing Registry Data)"))
+	/** Includes the estimated physics resource size; the report page shows it in megabytes. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Physics Size (Loads Meshes Missing Registry Data)"))
 	bool bPhysicsSize = false;
 
-	/** Includes the complex collision vertex count in the generated CSV. */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Complex Collision Info (Needs Asset Loading)"))
+	/** Includes the complex collision vertex count in the Mesh Analytics report. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Complex Collision Info (Loads Static Meshes)"))
 	bool bComplexCollisionInfo = false;
 	
-	/** Includes the unique texture count in the generated CSV. */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Texture Count (Needs Asset Loading)"))
+	/** Includes the unique textures used by the mesh's materials, with their count. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Texture Count (Loads Meshes)"))
 	bool bTextureCount = false;
 
-	/** Includes the maximum texture resolution in the generated CSV. */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Max Texture Resolution (Needs Asset Loading)"))
+	/** Includes the maximum texture resolution in the Mesh Analytics report. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Max Texture Resolution (Loads Meshes)"))
 	bool bMaxTextureResolution = false;
 
-	/** Includes the Static Mesh lightmap resolution in the generated CSV. */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Lightmap Resolution (Needs Asset Loading)"))
+	/** Includes the Static Mesh lightmap resolution in the Mesh Analytics report. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Lightmap Resolution (Loads Static Meshes)"))
 	bool bLightmapResolution = false;
 
 	/** Content Browser folders that will be searched for master materials. */
@@ -129,23 +129,24 @@ public:
 	 * Adds whether each material usage flag is enabled on the master, next to its users, so unused or missing
 	 * usages stand out. Each master material is loaded and unloaded again after its batch.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Usage Flags (Needs Asset Loading)"))
+	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Usage Flags (Loads Master Materials)"))
 	bool bMaterialUsageFlags = false;
 
 	/**
-	 * Loads Blueprint, Cascade particle system and skeletal mesh users to find the exact usage they need
-	 * (spline mesh, instanced static mesh, particle sprites, morph targets, cloth, ...). Niagara systems,
-	 * level actors and static mesh placements are not resolved. Users are unloaded again after each batch.
+	 * Loads Blueprint and Cascade particle system users to find the exact usage they need (spline mesh, instanced
+	 * static mesh, particle sprites, ...). Skeletal mesh users are checked for morph targets, cloth and mesh
+	 * deformers without loading them, from Asset Registry data and their package headers. Niagara systems, level
+	 * actors and static mesh placements are not resolved. Users are unloaded again after each batch.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Vertex Factory Users (Needs Asset Loading)"))
+	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Vertex Factory Users (Loads User Assets)"))
 	bool bMaterialResolveUsersByLoading = false;
 
 	/**
-	 * Finds the counted instances that compile their own shader map, how many unique static permutations they
-	 * make, how often each static switch is changed, and the shader count of the master plus one instance per
-	 * unique permutation from the engine's shader map layout. Masters and instances are loaded and unloaded after
+	 * Finds the counted instances that compile their own shader map, how each instance sets the static parameters
+	 * and base properties, and the shader count of the master plus one instance per unique static permutation from
+	 * the engine's shader map layout. Masters and instances are loaded and unloaded after
 	 * each batch.
 	 */
-	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Shader Permutations (Needs Asset Loading)"))
+	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Shader Permutations (Loads Master Materials and Instances)"))
 	bool bMaterialShaderPermutations = false;
 };

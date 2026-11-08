@@ -52,7 +52,7 @@ void FAssetAnalyticsModule::RegisterMenus()
 	Section.AddEntry(FToolMenuEntry::InitMenuEntry(
 		"GenerateMeshAnalyticsReport",
 		LOCTEXT("GenerateMeshAnalyticsReport", "Generate Mesh Analytics Report"),
-		LOCTEXT("GenerateMeshAnalyticsReportTooltip", "Gather mesh analytics, save the CSV, and open the browser report."),
+		LOCTEXT("GenerateMeshAnalyticsReportTooltip", "Gather mesh analytics, save the JSON report, and open the browser report."),
 		FSlateIcon(),
 		FUIAction(FExecuteAction::CreateStatic(&AssetAnalytics::Mesh::RunMeshAnalyticsReport))));
 	Section.AddEntry(FToolMenuEntry::InitMenuEntry(

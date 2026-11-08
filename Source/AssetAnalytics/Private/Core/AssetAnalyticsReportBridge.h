@@ -35,23 +35,8 @@ namespace Core
 		/** Registered route that selects an asset in the Content Browser. */
 		TSharedPtr<const FHttpRouteHandleInternal> SelectAssetRoute;
 
-		/** Registered route that serves the report HTML page. */
-		TSharedPtr<const FHttpRouteHandleInternal> ReportPageRoute;
-
-		/** Registered route that serves the report stylesheet. */
-		TSharedPtr<const FHttpRouteHandleInternal> ReportStylesRoute;
-
-		/** Registered route that serves the report application script. */
-		TSharedPtr<const FHttpRouteHandleInternal> ReportScriptRoute;
-
-		/** Registered route that serves the local Plotly script. */
-		TSharedPtr<const FHttpRouteHandleInternal> ReportPlotlyRoute;
-
-		/** Registered route that serves the generated Mesh Analytics CSV. */
-		TSharedPtr<const FHttpRouteHandleInternal> ReportCsvRoute;
-
-		/** Registered routes that serve the Material Analytics page, its files, and its JSON data. */
-		TArray<TSharedPtr<const FHttpRouteHandleInternal>> MaterialReportRoutes;
+		/** Registered routes that serve the report page, its scripts and styles, and the generated JSON reports. */
+		TArray<TSharedPtr<const FHttpRouteHandleInternal>> ReportFileRoutes;
 	};
 }
 }

@@ -23,26 +23,17 @@ namespace Core
 	static constexpr uint32 ReportBridgePort = 19842;
 	static const TCHAR* ReportBridgeRoute = TEXT("/asset-analytics/select");
 	static const TCHAR* ReportPageRoutePath = TEXT("/asset-analytics/report/page");
-	static const TCHAR* ReportStylesRoutePath = TEXT("/asset-analytics/report/styles");
-	static const TCHAR* ReportScriptRoutePath = TEXT("/asset-analytics/report/script");
-	static const TCHAR* ReportPlotlyRoutePath = TEXT("/asset-analytics/report/plotly");
-	static const TCHAR* ReportCsvRoutePath = TEXT("/asset-analytics/report/data");
-	static const TCHAR* MaterialReportPageRoutePath = TEXT("/asset-analytics/material-report/page");
-	static const TCHAR* MaterialReportStylesRoutePath = TEXT("/asset-analytics/material-report/styles");
-	static const TCHAR* MaterialReportScriptRoutePath = TEXT("/asset-analytics/material-report/script");
-	static const TCHAR* MaterialReportPlotlyRoutePath = TEXT("/asset-analytics/material-report/plotly");
-	static const TCHAR* MaterialReportJsonRoutePath = TEXT("/asset-analytics/material-report/data");
 
 	/** Returns the local URL that opens the Mesh Analytics report page. */
 	FString GetMeshAnalyticsReportUrl()
 	{
-		return FString::Printf(TEXT("http://127.0.0.1:%u%s"), ReportBridgePort, ReportPageRoutePath);
+		return FString::Printf(TEXT("http://127.0.0.1:%u%s?type=mesh"), ReportBridgePort, ReportPageRoutePath);
 	}
 
 	/** Returns the local URL that opens the Material Analytics report page. */
 	FString GetMaterialAnalyticsReportUrl()
 	{
-		return FString::Printf(TEXT("http://127.0.0.1:%u%s"), ReportBridgePort, MaterialReportPageRoutePath);
+		return FString::Printf(TEXT("http://127.0.0.1:%u%s?type=material"), ReportBridgePort, ReportPageRoutePath);
 	}
 
 	/** Returns whether Request came from this machine. */
@@ -109,82 +100,6 @@ namespace Core
 		Response->Headers.Add(TEXT("Cache-Control"), { TEXT("no-store") });
 		OnComplete(MoveTemp(Response));
 		return true;
-	}
-
-	/** Serves the Mesh Analytics report HTML from the plugin Report folder. */
-	static bool HandleReportPageRequest(
-		const FHttpServerRequest& Request,
-		const FHttpResultCallback& OnComplete)
-	{
-		const FString FilePath = GetPluginReportPath(TEXT("Report/index.html"));
-		return HandleReportFileRequest(Request, OnComplete, FilePath, TEXT("text/html; charset=utf-8"));
-	}
-
-	/** Serves the Mesh Analytics report stylesheet from the plugin Report folder. */
-	static bool HandleReportStylesRequest(
-		const FHttpServerRequest& Request,
-		const FHttpResultCallback& OnComplete)
-	{
-		const FString FilePath = GetPluginReportPath(TEXT("Report/core/styles.css"));
-		return HandleReportFileRequest(Request, OnComplete, FilePath, TEXT("text/css; charset=utf-8"));
-	}
-
-	/** Serves the Mesh Analytics report application script from the plugin Report folder. */
-	static bool HandleReportScriptRequest(
-		const FHttpServerRequest& Request,
-		const FHttpResultCallback& OnComplete)
-	{
-		const FString FilePath = GetPluginReportPath(TEXT("Report/core/app.js"));
-		return HandleReportFileRequest(Request, OnComplete, FilePath, TEXT("application/javascript; charset=utf-8"));
-	}
-
-	/** Serves the local Plotly script used by the Mesh Analytics report. */
-	static bool HandleReportPlotlyRequest(
-		const FHttpServerRequest& Request,
-		const FHttpResultCallback& OnComplete)
-	{
-		const FString FilePath = GetPluginReportPath(TEXT("Report/core/plotly-basic-3.7.0.min.js"));
-		return HandleReportFileRequest(Request, OnComplete, FilePath, TEXT("application/javascript; charset=utf-8"));
-	}
-
-	/** Serves the most recently generated Mesh Analytics CSV from the project Saved folder. */
-	static bool HandleReportCsvRequest(
-		const FHttpServerRequest& Request,
-		const FHttpResultCallback& OnComplete)
-	{
-		const FString FilePath = FPaths::Combine(
-			FPaths::ProjectSavedDir(),
-			TEXT("AssetAnalytics/MeshAnalytics.csv"));
-		return HandleReportFileRequest(Request, OnComplete, FilePath, TEXT("text/csv; charset=utf-8"));
-	}
-
-	/** Serves the Material Analytics report HTML from the plugin Report folder. */
-	static bool HandleMaterialReportPageRequest(
-		const FHttpServerRequest& Request,
-		const FHttpResultCallback& OnComplete)
-	{
-		const FString FilePath = GetPluginReportPath(TEXT("Report/material/index.html"));
-		return HandleReportFileRequest(Request, OnComplete, FilePath, TEXT("text/html; charset=utf-8"));
-	}
-
-	/** Serves the Material Analytics report application script from the plugin Report folder. */
-	static bool HandleMaterialReportScriptRequest(
-		const FHttpServerRequest& Request,
-		const FHttpResultCallback& OnComplete)
-	{
-		const FString FilePath = GetPluginReportPath(TEXT("Report/material/app.js"));
-		return HandleReportFileRequest(Request, OnComplete, FilePath, TEXT("application/javascript; charset=utf-8"));
-	}
-
-	/** Serves the most recently generated Material Analytics JSON from the project Saved folder. */
-	static bool HandleMaterialReportJsonRequest(
-		const FHttpServerRequest& Request,
-		const FHttpResultCallback& OnComplete)
-	{
-		const FString FilePath = FPaths::Combine(
-			FPaths::ProjectSavedDir(),
-			TEXT("AssetAnalytics/MaterialAnalytics.json"));
-		return HandleReportFileRequest(Request, OnComplete, FilePath, TEXT("application/json; charset=utf-8"));
 	}
 
 	/** Reads an asset link from Request and selects that asset in the Content Browser. */
@@ -262,54 +177,47 @@ namespace Core
 			FHttpPath(ReportBridgeRoute),
 			EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_OPTIONS,
 			FHttpRequestHandler::CreateStatic(&HandleReportBridgeRequest));
-		ReportPageRoute = ReportHttpRouter->BindRoute(
-			FHttpPath(ReportPageRoutePath),
-			EHttpServerRequestVerbs::VERB_GET,
-			FHttpRequestHandler::CreateStatic(&HandleReportPageRequest));
-		ReportStylesRoute = ReportHttpRouter->BindRoute(
-			FHttpPath(ReportStylesRoutePath),
-			EHttpServerRequestVerbs::VERB_GET,
-			FHttpRequestHandler::CreateStatic(&HandleReportStylesRequest));
-		ReportScriptRoute = ReportHttpRouter->BindRoute(
-			FHttpPath(ReportScriptRoutePath),
-			EHttpServerRequestVerbs::VERB_GET,
-			FHttpRequestHandler::CreateStatic(&HandleReportScriptRequest));
-		ReportPlotlyRoute = ReportHttpRouter->BindRoute(
-			FHttpPath(ReportPlotlyRoutePath),
-			EHttpServerRequestVerbs::VERB_GET,
-			FHttpRequestHandler::CreateStatic(&HandleReportPlotlyRequest));
-		ReportCsvRoute = ReportHttpRouter->BindRoute(
-			FHttpPath(ReportCsvRoutePath),
-			EHttpServerRequestVerbs::VERB_GET,
-			FHttpRequestHandler::CreateStatic(&HandleReportCsvRequest));
-		// The material page uses the same relative file names, so the shared styles and Plotly handlers are reused.
-		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
-			FHttpPath(MaterialReportPageRoutePath),
-			EHttpServerRequestVerbs::VERB_GET,
-			FHttpRequestHandler::CreateStatic(&HandleMaterialReportPageRequest)));
-		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
-			FHttpPath(MaterialReportStylesRoutePath),
-			EHttpServerRequestVerbs::VERB_GET,
-			FHttpRequestHandler::CreateStatic(&HandleReportStylesRequest)));
-		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
-			FHttpPath(MaterialReportScriptRoutePath),
-			EHttpServerRequestVerbs::VERB_GET,
-			FHttpRequestHandler::CreateStatic(&HandleMaterialReportScriptRequest)));
-		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
-			FHttpPath(MaterialReportPlotlyRoutePath),
-			EHttpServerRequestVerbs::VERB_GET,
-			FHttpRequestHandler::CreateStatic(&HandleReportPlotlyRequest)));
-		MaterialReportRoutes.Add(ReportHttpRouter->BindRoute(
-			FHttpPath(MaterialReportJsonRoutePath),
-			EHttpServerRequestVerbs::VERB_GET,
-			FHttpRequestHandler::CreateStatic(&HandleMaterialReportJsonRequest)));
-		const bool bMaterialRoutesValid = !MaterialReportRoutes.ContainsByPredicate(
+
+		// One page shows every report type; its ?type= picks the type and the JSON route it loads.
+		// The page loads the other files by these names relative to its own route.
+		struct FReportFileRoute
+		{
+			const TCHAR* RoutePath;
+			FString FilePath;
+			const TCHAR* ContentType;
+		};
+		const TCHAR* HtmlType = TEXT("text/html; charset=utf-8");
+		const TCHAR* ScriptType = TEXT("application/javascript; charset=utf-8");
+		const TCHAR* JsonType = TEXT("application/json; charset=utf-8");
+		const FString SavedReportDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("AssetAnalytics"));
+		const FReportFileRoute FileRoutes[] =
+		{
+			{ ReportPageRoutePath, GetPluginReportPath(TEXT("Report/index.html")), HtmlType },
+			{ TEXT("/asset-analytics/report/styles"), GetPluginReportPath(TEXT("Report/core/styles.css")), TEXT("text/css; charset=utf-8") },
+			{ TEXT("/asset-analytics/report/plotly"), GetPluginReportPath(TEXT("Report/core/plotly-basic-3.7.0.min.js")), ScriptType },
+			{ TEXT("/asset-analytics/report/script"), GetPluginReportPath(TEXT("Report/core/report.js")), ScriptType },
+			{ TEXT("/asset-analytics/report/mesh-script"), GetPluginReportPath(TEXT("Report/core/mesh.js")), ScriptType },
+			{ TEXT("/asset-analytics/report/material-script"), GetPluginReportPath(TEXT("Report/core/material.js")), ScriptType },
+			{ TEXT("/asset-analytics/report/mesh-data"), FPaths::Combine(SavedReportDir, TEXT("MeshAnalytics.json")), JsonType },
+			{ TEXT("/asset-analytics/report/material-data"), FPaths::Combine(SavedReportDir, TEXT("MaterialAnalytics.json")), JsonType },
+		};
+		for (const FReportFileRoute& FileRoute : FileRoutes)
+		{
+			ReportFileRoutes.Add(ReportHttpRouter->BindRoute(
+				FHttpPath(FileRoute.RoutePath),
+				EHttpServerRequestVerbs::VERB_GET,
+				FHttpRequestHandler::CreateLambda(
+					[FilePath = FileRoute.FilePath, ContentType = FString(FileRoute.ContentType)](
+						const FHttpServerRequest& Request,
+						const FHttpResultCallback& OnComplete)
+					{
+						return HandleReportFileRequest(Request, OnComplete, FilePath, ContentType);
+					})));
+		}
+		const bool bFileRoutesValid = !ReportFileRoutes.ContainsByPredicate(
 			[](const TSharedPtr<const FHttpRouteHandleInternal>& Route) { return !Route.IsValid(); });
 
-		if (!SelectAssetRoute.IsValid() || !ReportPageRoute.IsValid() ||
-			!ReportStylesRoute.IsValid() || !ReportScriptRoute.IsValid() ||
-			!ReportPlotlyRoute.IsValid() || !ReportCsvRoute.IsValid() ||
-			!bMaterialRoutesValid)
+		if (!SelectAssetRoute.IsValid() || !bFileRoutesValid)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("One or more Asset Analytics report routes could not be registered."));
 			Stop();
@@ -323,22 +231,12 @@ namespace Core
 	void FAssetAnalyticsReportBridge::Stop()
 	{
 		if (ReportHttpRouter.IsValid() && SelectAssetRoute.IsValid()) ReportHttpRouter->UnbindRoute(SelectAssetRoute);
-		if (ReportHttpRouter.IsValid() && ReportPageRoute.IsValid()) ReportHttpRouter->UnbindRoute(ReportPageRoute);
-		if (ReportHttpRouter.IsValid() && ReportStylesRoute.IsValid()) ReportHttpRouter->UnbindRoute(ReportStylesRoute);
-		if (ReportHttpRouter.IsValid() && ReportScriptRoute.IsValid()) ReportHttpRouter->UnbindRoute(ReportScriptRoute);
-		if (ReportHttpRouter.IsValid() && ReportPlotlyRoute.IsValid()) ReportHttpRouter->UnbindRoute(ReportPlotlyRoute);
-		if (ReportHttpRouter.IsValid() && ReportCsvRoute.IsValid()) ReportHttpRouter->UnbindRoute(ReportCsvRoute);
-		for (const TSharedPtr<const FHttpRouteHandleInternal>& Route : MaterialReportRoutes)
+		for (const TSharedPtr<const FHttpRouteHandleInternal>& Route : ReportFileRoutes)
 		{
 			if (ReportHttpRouter.IsValid() && Route.IsValid()) ReportHttpRouter->UnbindRoute(Route);
 		}
-		MaterialReportRoutes.Reset();
+		ReportFileRoutes.Reset();
 		SelectAssetRoute.Reset();
-		ReportPageRoute.Reset();
-		ReportStylesRoute.Reset();
-		ReportScriptRoute.Reset();
-		ReportPlotlyRoute.Reset();
-		ReportCsvRoute.Reset();
 		ReportHttpRouter.Reset();
 	}
 }

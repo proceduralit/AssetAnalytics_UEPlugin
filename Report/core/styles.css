@@ -9,6 +9,11 @@
     box-sizing: border-box;
 }
 
+/* Elements given their own display, such as the header actions, still hide with the hidden attribute. */
+[hidden] {
+    display: none !important;
+}
+
 body {
     min-width: 320px;
     margin: 0;
@@ -61,6 +66,27 @@ h1 {
 .file-button:focus-visible {
     outline: 2px solid #36a3ff;
     outline-offset: 2px;
+}
+
+.header-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+.header-actions select {
+    padding: 9px 12px;
+    border: 1px solid #46505b;
+    border-radius: 7px;
+    background: #20262d;
+    color: #f3f5f7;
+    font: inherit;
+}
+
+#cook-stats-summary.error {
+    color: #ff9a9a;
 }
 
 .filter-panel {
@@ -412,6 +438,190 @@ h1 {
 #status.error {
     color: #ff8f8f;
 }
+
+/* Details of the selected point, shown below the graph. */
+.asset-details {
+    margin-top: 26px;
+    padding: 20px 22px;
+    border: 1px solid #323a43;
+    border-radius: 10px;
+    background: #171b20;
+}
+
+.asset-details h2 {
+    margin: 0 0 4px;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.asset-details h3 {
+    margin: 22px 0 10px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #dce2e8;
+}
+
+.details-path {
+    margin: 0;
+    color: #9ba4ae;
+    word-break: break-all;
+}
+
+.details-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 28px;
+    margin-top: 14px;
+    color: #dce2e8;
+}
+
+.details-summary b {
+    color: #9ba4ae;
+    font-weight: 500;
+}
+
+.details-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+.details-table th,
+.details-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid #2a323b;
+    text-align: left;
+    vertical-align: top;
+}
+
+.details-table th {
+    color: #9ba4ae;
+    font-weight: 500;
+}
+
+.path-list summary {
+    cursor: pointer;
+    color: #dce2e8;
+}
+
+.path-list ul {
+    margin: 6px 0 2px;
+    padding-left: 18px;
+}
+
+.path-list li {
+    margin: 3px 0;
+    word-break: break-all;
+}
+
+.path-link {
+    padding: 0;
+    border: none;
+    background: none;
+    color: #6fbcff;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+}
+
+.path-link:hover {
+    text-decoration: underline;
+}
+
+.path-text {
+    color: #9ba4ae;
+}
+
+/* Usage status of a vertex factory in the Material Analytics details. */
+.status-pill {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.status-pill.used-not-enabled { background: #4a1f24; color: #ff9a9a; }
+.status-pill.enabled-unused { background: #4a3a1a; color: #ffd27a; }
+.status-pill.ok { background: #183a2c; color: #7be0b0; }
+.status-pill.unknown { background: #252c34; color: #9ba4ae; }
+
+/* Grid of instances against static parameters in the Material Analytics details, and its legend. */
+.grid-legend {
+    display: grid;
+    gap: 6px;
+    margin: 10px 0 12px;
+    color: #dce2e8;
+    font-size: 14px;
+}
+
+.grid-legend p {
+    margin: 4px 0 0;
+}
+
+.grid-legend-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.grid-swatch {
+    flex: none;
+    width: 28px;
+    height: 20px;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 20px;
+    text-align: center;
+}
+
+.permutation-grid-scroll {
+    max-height: 70vh;
+    overflow: auto;
+    border: 1px solid #2a323b;
+}
+
+.permutation-grid {
+    width: max-content;
+    min-width: 100%;
+}
+
+.permutation-grid thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    max-width: 160px;
+    background: #171b20;
+    overflow-wrap: anywhere;
+}
+
+.permutation-grid tbody th {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: #171b20;
+    font-weight: 400;
+    white-space: nowrap;
+}
+
+.permutation-grid thead th:first-child {
+    left: 0;
+    z-index: 3;
+}
+
+.permutation-grid td.grid-cell {
+    border-left: 1px solid #0d0f12;
+    white-space: nowrap;
+}
+
+.grid-swatch.master,
+.grid-cell.master { background: #183a2c; color: #7be0b0; }
+.grid-swatch.same-as-parent,
+.grid-cell.same-as-parent { background: #4a3a1a; color: #ffd27a; }
+.grid-swatch.changed,
+.grid-cell.changed { background: #4a1f24; color: #ff9a9a; font-weight: 600; }
+.grid-cell.inherited { background: #183a2c; color: #7be0b0; font-style: italic; }
 
 @media (max-width: 760px) {
     .report-shell {

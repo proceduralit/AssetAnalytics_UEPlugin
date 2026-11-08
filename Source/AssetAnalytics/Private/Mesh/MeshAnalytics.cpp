@@ -22,8 +22,10 @@
 #include "PhysicsEngine/BodySetup.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "PhysicsEngine/PhysicsSettings.h"
+#include "Policies/PrettyJsonPrintPolicy.h"
 #include "Rendering/SkeletalMeshRenderData.h"
 #include "ProfilingDebugging/ResourceSize.h"
+#include "Serialization/JsonWriter.h"
 #include "UObject/Package.h"
 
 #define LOCTEXT_NAMESPACE "MeshAnalytics"
@@ -69,8 +71,12 @@ namespace Mesh
 		double NaniteFallbackPercent = -1.0;
 		/** Number of material slots. */
 		int32 MaterialSlotCount = INDEX_NONE;
+		/** Object paths of the materials and material instances the mesh's package references, sorted. */
+		TArray<FString> MaterialPaths;
 		/** Unique textures used by the mesh's materials. */
 		int32 TextureCount = INDEX_NONE;
+		/** Object paths of those unique textures, sorted. Empty when the mesh was not loaded. */
+		TArray<FString> TexturePaths;
 		/** Largest width or height among those textures. */
 		int32 MaxTextureResolution = INDEX_NONE;
 		/** UV channels in LOD 0. */
@@ -80,6 +86,9 @@ namespace Mesh
 		/** Longest side of the mesh bounds in meters. */
 		double MaxBoundsLengthM = -1.0;
 	};
+
+	/** JSON writer used for the report file. */
+	using FMeshJsonWriter = TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>;
 
 	/** Returns the report name of CollisionTraceFlag, resolving Default through the project's physics settings. */
 	static FString GetCollisionComplexityName(ECollisionTraceFlag CollisionTraceFlag)
@@ -119,6 +128,14 @@ namespace Mesh
 			}
 		}
 		Item.TextureCount = UniqueTextures.Num();
+		if (bCollectTextureCount)
+		{
+			for (const UTexture* Texture : UniqueTextures)
+			{
+				Item.TexturePaths.Add(Texture->GetPathName());
+			}
+			Item.TexturePaths.Sort();
+		}
 
 		if (!bCollectTextureResolution) return;
 		int32 MaxTextureResolution = 0;
@@ -253,6 +270,37 @@ namespace Mesh
 		if (Settings.bLightmapResolution) Item.LightmapResolution = StaticMesh.GetLightMapResolution();
 	}
 
+	/**
+	 * Lists the materials and material instances MeshData's package references, without loading anything.
+	 * This covers the material slots and any other material the mesh saves, such as LOD or overlay materials.
+	 * Returns: Sorted object paths.
+	 */
+	static TArray<FString> FindReferencedMaterials(IAssetRegistry& AssetRegistry, const FAssetData& MeshData)
+	{
+		TArray<FName> Dependencies;
+		AssetRegistry.GetDependencies(
+			MeshData.PackageName,
+			Dependencies,
+			UE::AssetRegistry::EDependencyCategory::Package,
+			UE::AssetRegistry::FDependencyQuery(UE::AssetRegistry::EDependencyQuery::Hard));
+
+		TArray<FString> MaterialPaths;
+		for (const FName Dependency : Dependencies)
+		{
+			TArray<FAssetData> DependencyAssets;
+			AssetRegistry.GetAssetsByPackageName(Dependency, DependencyAssets);
+			for (const FAssetData& DependencyAsset : DependencyAssets)
+			{
+				if (DependencyAsset.IsInstanceOf(UMaterialInterface::StaticClass()))
+				{
+					MaterialPaths.Add(DependencyAsset.GetObjectPathString());
+				}
+			}
+		}
+		MaterialPaths.Sort();
+		return MaterialPaths;
+	}
+
 	/** Fills Item with values cached in the Asset Registry. */
 	static void GatherAssetRegistryData(
 		IAssetRegistry& AssetRegistry,
@@ -282,6 +330,7 @@ namespace Mesh
 				AssetData.GetTagValue(TEXT("NaniteFallbackPercent"), Item.NaniteFallbackPercent);
 			}
 		}
+		if (Settings.bMaterialCount) Item.MaterialPaths = FindReferencedMaterials(AssetRegistry, AssetData);
 
 		// Skeletal meshes have no LOD group and do not store the remaining tags.
 		if (Item.bIsSkeletalMesh) return;
@@ -335,6 +384,15 @@ namespace Mesh
 			Settings.bMaxBoundsLength ||
 			Settings.bComplexCollisionInfo ||
 			Settings.bLightmapResolution;
+	}
+
+	/**
+	 * Returns whether the enabled columns read registry data outside the search folders: referencers for skipping
+	 * unreferenced meshes, and referenced materials. The run then waits for the registry's startup scan.
+	 */
+	static bool NeedsFullAssetRegistry(const UAssetAnalyticsSettings& Settings)
+	{
+		return Settings.bIgnoreUnreferencedAssets || Settings.bMaterialCount;
 	}
 
 	/** Returns whether the enabled columns require loading AssetData. */
@@ -395,14 +453,7 @@ namespace Mesh
 		/** Stops gathering and throws away unfinished results. */
 		void Stop()
 		{
-			if (TickerHandle.IsValid())
-			{
-				FTSTicker::RemoveTicker(TickerHandle);
-				TickerHandle.Reset();
-			}
-			TrackUnfinishedBatch();
-			ResetReportData();
-			PackageUnloader.UnloadReportPackages();
+			AbortRun();
 			ProgressNotification.Dismiss();
 		}
 
@@ -412,6 +463,8 @@ namespace Mesh
 		{
 			/** Waits briefly so the notification is visible before any blocking work. */
 			ShowNotification,
+			/** Waits without blocking until the Asset Registry has finished its startup scan. */
+			WaitForAssetRegistry,
 			/** Scans the search folders and lists the mesh assets. */
 			FindMeshes,
 			/** Fills report rows within a per-tick time budget. */
@@ -441,7 +494,7 @@ namespace Mesh
 			AssetItems.Reset();
 			NextAssetIndex = 0;
 			AssetsInBatch = 0;
-			bBatchLoadedAnyAsset = false;
+			BatchLoadedAssetCount = 0;
 			PackagesBeforeBatch.Reset();
 			CurrentAssetName.Reset();
 		}
@@ -449,11 +502,11 @@ namespace Mesh
 		/** Adds the packages loaded by a batch that was interrupted to the unloader, so they are not left loaded. */
 		void TrackUnfinishedBatch()
 		{
-			if (AssetsInBatch > 0 && bBatchLoadedAnyAsset) PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
+			if (AssetsInBatch > 0 && BatchLoadedAssetCount > 0) PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
 		}
 
-		/** Cancels gathering, clears unfinished results, and updates the notification. */
-		void Cancel()
+		/** Stops ticking, throws away unfinished results, and unloads the packages the run loaded. */
+		void AbortRun()
 		{
 			if (TickerHandle.IsValid())
 			{
@@ -463,6 +516,12 @@ namespace Mesh
 			TrackUnfinishedBatch();
 			ResetReportData();
 			PackageUnloader.UnloadReportPackages();
+		}
+
+		/** Cancels gathering, clears unfinished results, and updates the notification. */
+		void Cancel()
+		{
+			AbortRun();
 			ProgressNotification.Finish(
 				LOCTEXT("MeshAnalyticsCancelled", "Mesh Analytics gathering cancelled."),
 				SNotificationItem::CS_None);
@@ -539,19 +598,20 @@ namespace Mesh
 				if (bLoadsAssets && AssetsInBatch == 0)
 				{
 					PackagesBeforeBatch = Core::FReportPackageUnloader::GetLoadedPackages();
-					bBatchLoadedAnyAsset = false;
+					BatchStartSeconds = FPlatformTime::Seconds();
+					BatchLoadedAssetCount = 0;
 				}
 
 				const FAssetData& AssetData = PendingAssets[NextAssetIndex];
 				CurrentAssetName = AssetData.AssetName.ToString();
-				if (ProcessMeshAsset(AssetRegistry, Settings, AssetData)) bBatchLoadedAnyAsset = true;
+				if (ProcessMeshAsset(AssetRegistry, Settings, AssetData)) ++BatchLoadedAssetCount;
 				++NextAssetIndex;
 				++AssetsInBatch;
 
 				const bool bBatchFinished = AssetsInBatch >= AssetsPerBatch || NextAssetIndex >= PendingAssets.Num();
 				if (bBatchFinished)
 				{
-					if (bBatchLoadedAnyAsset)
+					if (BatchLoadedAssetCount > 0)
 					{
 						// Unloading can take a while, so it gets its own tick and message.
 						PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
@@ -595,6 +655,22 @@ namespace Mesh
 			case ERunnerStep::ShowNotification:
 				// The notification fades in over a few frames; blocking work before that would hide it.
 				if (FPlatformTime::Seconds() - StepStartSeconds < NotificationDisplayDelaySeconds) return true;
+				if (NeedsFullAssetRegistry(*Settings))
+				{
+					Step = ERunnerStep::WaitForAssetRegistry;
+					return true;
+				}
+				Step = ERunnerStep::FindMeshes;
+				ProgressNotification.SetText(LOCTEXT("ScanningMeshFolders", "Mesh Analytics\nScanning mesh folders..."));
+				return true;
+
+			case ERunnerStep::WaitForAssetRegistry:
+				// Polling instead of WaitForCompletion lets the registry keep scanning while the editor stays responsive.
+				if (AssetRegistry.IsLoadingAssets())
+				{
+					ProgressNotification.SetText(LOCTEXT("WaitingForAssetRegistry", "Mesh Analytics\nWaiting for the Asset Registry to finish scanning..."));
+					return true;
+				}
 				Step = ERunnerStep::FindMeshes;
 				ProgressNotification.SetText(LOCTEXT("ScanningMeshFolders", "Mesh Analytics\nScanning mesh folders..."));
 				return true;
@@ -616,8 +692,15 @@ namespace Mesh
 
 			case ERunnerStep::UnloadPackages:
 				PackageUnloader.UnloadReportPackages();
+				UE_LOG(
+					LogTemp,
+					Log,
+					TEXT("Mesh Analytics loaded and unloaded %d meshes for %d assets in %.2f s."),
+					BatchLoadedAssetCount,
+					AssetsInBatch,
+					FPlatformTime::Seconds() - BatchStartSeconds);
 				AssetsInBatch = 0;
-				bBatchLoadedAnyAsset = false;
+				BatchLoadedAssetCount = 0;
 				if (NextAssetIndex >= PendingAssets.Num())
 				{
 					TickerHandle.Reset();
@@ -631,7 +714,7 @@ namespace Mesh
 			return true;
 		}
 
-		/** Sorts the results, saves the CSV, and opens the browser report. */
+		/** Sorts the results, saves the JSON report, and opens the browser report. */
 		void CompleteReport()
 		{
 			AssetItems.Sort([](const FMeshAssetData& Left, const FMeshAssetData& Right)
@@ -646,19 +729,20 @@ namespace Mesh
 				FPaths::ProjectSavedDir(),
 				TEXT("AssetAnalytics"));
 			IFileManager::Get().MakeDirectory(*ReportDirectory, true);
-			const FString CsvPath = FPaths::Combine(ReportDirectory, TEXT("MeshAnalytics.csv"));
+			const FString JsonPath = FPaths::Combine(ReportDirectory, TEXT("MeshAnalytics.json"));
 			if (!FFileHelper::SaveStringToFile(
-				BuildCsvData(),
-				*CsvPath,
+				BuildJsonData(),
+				*JsonPath,
 				FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 			{
 				ProgressNotification.Finish(
-					LOCTEXT("AutomaticExportFailed", "The mesh analytics CSV file could not be saved."),
+					LOCTEXT("MeshJsonSaveFailed", "The mesh analytics JSON file could not be saved."),
 					SNotificationItem::CS_Fail);
 				ResetReportData();
 				return;
 			}
 
+			UE_LOG(LogTemp, Log, TEXT("Asset Analytics saved the Mesh Analytics report to %s"), *FPaths::ConvertRelativePathToFull(JsonPath));
 			const FString ReportUrl = Core::GetMeshAnalyticsReportUrl();
 			FPlatformProcess::LaunchURL(*ReportUrl, nullptr, nullptr);
 			ProgressNotification.Finish(
@@ -669,77 +753,100 @@ namespace Mesh
 			ResetReportData();
 		}
 
-		/** Returns CSV text containing the enabled columns and finished rows. */
-		FString BuildCsvData() const
+		/** Writes a number, or null when it is INDEX_NONE. */
+		static void WriteNumberOrNull(FMeshJsonWriter& Writer, const TCHAR* Name, const int32 Value)
+		{
+			if (Value != INDEX_NONE) Writer.WriteValue(Name, Value);
+			else Writer.WriteNull(Name);
+		}
+
+		/** Writes a number, or null when it is negative. */
+		static void WriteNumberOrNull(FMeshJsonWriter& Writer, const TCHAR* Name, const int64 Value)
+		{
+			if (Value >= 0) Writer.WriteValue(Name, Value);
+			else Writer.WriteNull(Name);
+		}
+
+		/** Writes a number, or null when it is negative. */
+		static void WriteNumberOrNull(FMeshJsonWriter& Writer, const TCHAR* Name, const double Value)
+		{
+			if (Value >= 0.0) Writer.WriteValue(Name, Value);
+			else Writer.WriteNull(Name);
+		}
+
+		/** Writes Paths as a JSON array named Name. */
+		static void WritePathArray(FMeshJsonWriter& Writer, const TCHAR* Name, const TArray<FString>& Paths)
+		{
+			Writer.WriteArrayStart(Name);
+			for (const FString& Path : Paths)
+			{
+				Writer.WriteValue(Path);
+			}
+			Writer.WriteArrayEnd();
+		}
+
+		/**
+		 * Writes one mesh entry with the enabled fields. Unknown values are written as null.
+		 * Output: Appends a JSON object to Writer, which must be inside the Meshes array.
+		 */
+		static void WriteMeshJson(FMeshJsonWriter& Writer, const FMeshAssetData& Item, const UAssetAnalyticsSettings& Settings)
+		{
+			Writer.WriteObjectStart();
+			Writer.WriteValue(TEXT("AssetName"), Item.AssetData.AssetName.ToString());
+			Writer.WriteValue(TEXT("PackagePath"), Item.AssetData.PackagePath.ToString());
+			Writer.WriteValue(TEXT("IsSkeletalMesh"), Item.bIsSkeletalMesh);
+			if (Settings.bPackageDiskSize) WriteNumberOrNull(Writer, TEXT("PackageDiskSize"), Item.PackageDiskSize);
+			if (Settings.bLODCount) WriteNumberOrNull(Writer, TEXT("LODCount"), Item.LODCount);
+			if (Settings.bLODGroup) Writer.WriteValue(TEXT("LODGroup"), Item.LODGroup);
+			if (Settings.bCollisionInfo)
+			{
+				if (!Item.CollisionComplexity.IsEmpty()) Writer.WriteValue(TEXT("CollisionComplexity"), Item.CollisionComplexity);
+				else Writer.WriteNull(TEXT("CollisionComplexity"));
+				WriteNumberOrNull(Writer, TEXT("SimpleCollisionPrimitives"), Item.SimpleCollisionPrimitives);
+			}
+			if (Settings.bPhysicsSize) WriteNumberOrNull(Writer, TEXT("PhysicsSize"), Item.PhysicsSize);
+			if (Settings.bComplexCollisionInfo) WriteNumberOrNull(Writer, TEXT("ComplexCollisionVertices"), Item.ComplexCollisionVertices);
+			if (Settings.bTriangleCount) WriteNumberOrNull(Writer, TEXT("LOD0Triangles"), Item.TriangleCount);
+			if (Settings.bNaniteInfo)
+			{
+				Writer.WriteValue(TEXT("NaniteEnabled"), Item.bNaniteEnabled);
+				WriteNumberOrNull(Writer, TEXT("NaniteTriangles"), Item.NaniteTriangles);
+				WriteNumberOrNull(Writer, TEXT("NaniteFallbackPercent"), Item.NaniteFallbackPercent);
+			}
+			if (Settings.bMaterialCount)
+			{
+				WriteNumberOrNull(Writer, TEXT("MaterialSlots"), Item.MaterialSlotCount);
+				// Every material the package references, found in the registry, so it can differ from the slot count.
+				WritePathArray(Writer, TEXT("Materials"), Item.MaterialPaths);
+			}
+			if (Settings.bTextureCount)
+			{
+				WriteNumberOrNull(Writer, TEXT("UniqueTextures"), Item.TextureCount);
+				if (Item.TextureCount != INDEX_NONE) WritePathArray(Writer, TEXT("Textures"), Item.TexturePaths);
+			}
+			if (Settings.bMaxTextureResolution) WriteNumberOrNull(Writer, TEXT("MaxTextureResolution"), Item.MaxTextureResolution);
+			if (Settings.bUVChannelCount) WriteNumberOrNull(Writer, TEXT("UVChannels"), Item.UVChannelCount);
+			if (Settings.bLightmapResolution) WriteNumberOrNull(Writer, TEXT("LightmapResolution"), Item.LightmapResolution);
+			if (Settings.bMaxBoundsLength) WriteNumberOrNull(Writer, TEXT("MaxBoundsLengthM"), Item.MaxBoundsLengthM);
+			Writer.WriteObjectEnd();
+		}
+
+		/** Returns the JSON report text for the finished meshes and the enabled fields. */
+		FString BuildJsonData() const
 		{
 			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
-			TArray<FString> HeaderFields;
-			HeaderFields.Add(TEXT("AssetName"));
-			HeaderFields.Add(TEXT("PackagePath"));
-			HeaderFields.Add(TEXT("IsSkeletalMesh"));
-			if (Settings->bPackageDiskSize) HeaderFields.Add(TEXT("PackageDiskSize"));
-			if (Settings->bLODCount) HeaderFields.Add(TEXT("LODCount"));
-			if (Settings->bLODGroup) HeaderFields.Add(TEXT("LODGroup"));
-			if (Settings->bCollisionInfo)
-			{
-				HeaderFields.Add(TEXT("CollisionComplexity"));
-				HeaderFields.Add(TEXT("SimpleCollisionPrimitives"));
-			}
-			if (Settings->bPhysicsSize) HeaderFields.Add(TEXT("PhysicsSizeMB"));
-			if (Settings->bComplexCollisionInfo) HeaderFields.Add(TEXT("ComplexCollisionVertices"));
-			if (Settings->bTriangleCount) HeaderFields.Add(TEXT("LOD0Triangles"));
-			if (Settings->bNaniteInfo)
-			{
-				HeaderFields.Add(TEXT("NaniteEnabled"));
-				HeaderFields.Add(TEXT("NaniteTriangles"));
-				HeaderFields.Add(TEXT("NaniteFallbackPercent"));
-			}
-			if (Settings->bMaterialCount) HeaderFields.Add(TEXT("MaterialSlots"));
-			if (Settings->bTextureCount) HeaderFields.Add(TEXT("UniqueTextures"));
-			if (Settings->bMaxTextureResolution) HeaderFields.Add(TEXT("MaxTextureResolution"));
-			if (Settings->bUVChannelCount) HeaderFields.Add(TEXT("UVChannels"));
-			if (Settings->bLightmapResolution) HeaderFields.Add(TEXT("LightmapResolution"));
-			if (Settings->bMaxBoundsLength) HeaderFields.Add(TEXT("MaxBoundsLengthM"));
-
-			FString CsvData = FString::Join(HeaderFields, TEXT(",")) + TEXT("\r\n");
+			FString JsonText;
+			const TSharedRef<FMeshJsonWriter> Writer = TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonText);
+			Writer->WriteObjectStart();
+			Writer->WriteArrayStart(TEXT("Meshes"));
 			for (const FMeshAssetData& Item : AssetItems)
 			{
-				TArray<FString> RowFields;
-				RowFields.Add(Core::EscapeCsvField(Item.AssetData.AssetName.ToString()));
-				RowFields.Add(Core::EscapeCsvField(Item.AssetData.PackagePath.ToString()));
-				RowFields.Add(Item.bIsSkeletalMesh ? TEXT("True") : TEXT("False"));
-				if (Settings->bPackageDiskSize) RowFields.Add(Core::CsvNumberOrEmpty(Item.PackageDiskSize));
-				if (Settings->bLODCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.LODCount));
-				if (Settings->bLODGroup) RowFields.Add(Core::EscapeCsvField(Item.LODGroup));
-				if (Settings->bCollisionInfo)
-				{
-					RowFields.Add(Core::EscapeCsvField(Item.CollisionComplexity));
-					RowFields.Add(Core::CsvNumberOrEmpty(Item.SimpleCollisionPrimitives));
-				}
-				if (Settings->bPhysicsSize)
-				{
-					const double PhysicsSizeMB = Item.PhysicsSize < 0
-						? -1.0
-						: static_cast<double>(Item.PhysicsSize) / (1024.0 * 1024.0);
-					RowFields.Add(Core::CsvNumberOrEmpty(PhysicsSizeMB));
-				}
-				if (Settings->bComplexCollisionInfo) RowFields.Add(Core::CsvNumberOrEmpty(Item.ComplexCollisionVertices));
-				if (Settings->bTriangleCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.TriangleCount));
-				if (Settings->bNaniteInfo)
-				{
-					RowFields.Add(Item.bNaniteEnabled ? TEXT("True") : TEXT("False"));
-					RowFields.Add(Core::CsvNumberOrEmpty(Item.NaniteTriangles));
-					RowFields.Add(Core::CsvNumberOrEmpty(Item.NaniteFallbackPercent));
-				}
-				if (Settings->bMaterialCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.MaterialSlotCount));
-				if (Settings->bTextureCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.TextureCount));
-				if (Settings->bMaxTextureResolution) RowFields.Add(Core::CsvNumberOrEmpty(Item.MaxTextureResolution));
-				if (Settings->bUVChannelCount) RowFields.Add(Core::CsvNumberOrEmpty(Item.UVChannelCount));
-				if (Settings->bLightmapResolution) RowFields.Add(Core::CsvNumberOrEmpty(Item.LightmapResolution));
-				if (Settings->bMaxBoundsLength) RowFields.Add(Core::CsvNumberOrEmpty(Item.MaxBoundsLengthM));
-				CsvData += FString::Join(RowFields, TEXT(",")) + TEXT("\r\n");
+				WriteMeshJson(*Writer, Item, *Settings);
 			}
-			return CsvData;
+			Writer->WriteArrayEnd();
+			Writer->WriteObjectEnd();
+			Writer->Close();
+			return JsonText;
 		}
 
 		/** How long the notification is shown before the first blocking step runs. */
@@ -764,8 +871,10 @@ namespace Mesh
 		double StepStartSeconds = 0.0;
 		/** Assets processed in the current batch. */
 		int32 AssetsInBatch = 0;
-		/** Whether the current batch loaded any asset from disk. */
-		bool bBatchLoadedAnyAsset = false;
+		/** Meshes loaded from disk in the current batch. */
+		int32 BatchLoadedAssetCount = 0;
+		/** When the current batch started, for the batch timing log. */
+		double BatchStartSeconds = 0.0;
 		/** Packages that were loaded before the current batch started. */
 		TSet<UPackage*> PackagesBeforeBatch;
 		/** Name of the last asset processed, shown in the notification. */
