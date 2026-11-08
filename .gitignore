@@ -1,6 +1,8 @@
 # Visual Studio 2015 user specific files
 .vs/
 .claude/
+agent.md
+CLAUDE.md
 
 # Compiled Object files
 *.slo
