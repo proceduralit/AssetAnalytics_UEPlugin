@@ -5,6 +5,8 @@
 //   defaultFileName, columns, defaultAxes ([x key, y key]), defaultFilterColumn (optional),
 //   renderDetails(asset, panel, ui), and the optional hooks
 //   init(context), onReportLoaded(report), beforeBuild(assets), afterShow(assets), pointStyle(row), loadCsv(file).
+// A numeric column with unknownPlotValue plots assets without a value at that position, as hollow grey "Unknown"
+// points, instead of listing them as not plotted. Filters still treat the value as missing.
 (() => {
     "use strict";
 
@@ -25,8 +27,12 @@
     const fileSummary = document.getElementById("file-summary");
     const status = document.getElementById("status");
     const detailsPanel = document.getElementById("asset-details");
+    const skippedPanel = document.getElementById("skipped-assets");
     const reportBridgeUrl = "http://127.0.0.1:19842/asset-analytics/select";
     const defaultPointStyle = { color: "#36a3ff", borderColor: "#b9ddff" };
+    // Hollow grey point for an asset plotted at a column's unknownPlotValue.
+    const unknownPointStyle = { color: "rgba(0, 0, 0, 0)", borderColor: "#9ba4ae", borderWidth: 2 };
+    const unknownText = "Unknown";
 
     // Details-panel helpers handed to each report type's renderDetails.
     const detailsHelpers = { addSummaryItem, addNumberItem, appendPathSection, createPathLink, createPathList, formatBytes };
@@ -48,6 +54,8 @@
     let chartHandlersBound = false;
     let boxZoomPending = false;
     let pointClickHandled = false;
+    // Rows that pass the filters but miss an X or Y value, as { row, missingLabels }, listed when nothing is selected.
+    let skippedRows = [];
 
     chooseFileButton.addEventListener("click", () => fileInput.click());
 
@@ -134,6 +142,7 @@
         selectedAssetLabel.textContent = `Selected ${type ? type.noun : "asset"}`;
         dropZone.setAttribute("aria-label", `${title} scatter plot`);
         detailsPanel.setAttribute("aria-label", `Selected ${type ? type.noun : "asset"} details`);
+        skippedPanel.setAttribute("aria-label", `${type ? type.nounPlural : "Assets"} not plotted`);
         document.querySelectorAll("[data-report-type]").forEach(element => {
             element.hidden = element.dataset.reportType !== type?.id;
         });
@@ -517,16 +526,41 @@
 
         // A report type may color points by a value, such as static and skeletal meshes, and name it in the tooltip.
         const pointStyle = activeType.pointStyle ?? (() => defaultPointStyle);
-        const points = filteredRows.flatMap(row => {
-            const x = metricValue(row[xMetric.key], xMetric.type);
-            const y = metricValue(row[yMetric.key], yMetric.type);
-            if (x === null || y === null) {
-                return [];
+        const points = [];
+        skippedRows = [];
+        let unknownCount = 0;
+        filteredRows.forEach(row => {
+            const knownX = metricValue(row[xMetric.key], xMetric.type);
+            const knownY = metricValue(row[yMetric.key], yMetric.type);
+            const x = knownX ?? xMetric.unknownPlotValue ?? null;
+            const y = knownY ?? yMetric.unknownPlotValue ?? null;
+            if (x !== null && y !== null) {
+                const isUnknown = knownX === null || knownY === null;
+                if (isUnknown) {
+                    unknownCount += 1;
+                }
+                points.push({
+                    row,
+                    x,
+                    y,
+                    xText: knownX === null ? unknownText : row[xMetric.key],
+                    yText: knownY === null ? unknownText : row[yMetric.key],
+                    style: isUnknown ? { ...pointStyle(row), ...unknownPointStyle } : pointStyle(row)
+                });
+                return;
             }
-            return [{ row, x, y, style: pointStyle(row) }];
+            const missingLabels = [];
+            if (x === null) {
+                missingLabels.push(xMetric.label);
+            }
+            if (y === null && yMetric !== xMetric) {
+                missingLabels.push(yMetric.label);
+            }
+            skippedRows.push({ row, missingLabels });
         });
+        skippedRows.sort((left, right) => left.row.AssetName.localeCompare(right.row.AssetName));
 
-        const skipped = filteredRows.length - points.length;
+        const skipped = skippedRows.length;
         boxZoomPending = false;
         pointClickHandled = false;
         clearSelectedAsset();
@@ -538,14 +572,17 @@
             customdata: points.map(point => [
                 point.row.AssetName || `Unnamed ${activeType.noun}`,
                 point.row.PackagePath || "",
-                point.row[xMetric.key],
-                point.row[yMetric.key],
+                point.xText,
+                point.yText,
                 point.row.assetIndex,
                 point.style.label ?? ""
             ]),
             marker: {
                 color: points.map(point => point.style.color),
-                line: { color: points.map(point => point.style.borderColor), width: 1 },
+                line: {
+                    color: points.map(point => point.style.borderColor),
+                    width: points.map(point => point.style.borderWidth ?? 1)
+                },
                 opacity: 0.76,
                 size: 10
             },
@@ -575,8 +612,17 @@
             dragmode: "pan",
             uirevision: `${activeType.id}:${xMetric.key}:${yMetric.key}`,
             xaxis: axisLayout(xMetric),
-            yaxis: axisLayout(yMetric)
+            yaxis: axisLayout(yMetric),
+            shapes: [],
+            annotations: []
         };
+        // A dotted line labelled Unknown marks where unknown values are plotted, since auto ticks may skip it.
+        if (points.some(point => point.xText === unknownText)) {
+            addUnknownGuide(layout, "x", xMetric.unknownPlotValue);
+        }
+        if (points.some(point => point.yText === unknownText)) {
+            addUnknownGuide(layout, "y", yMetric.unknownPlotValue);
+        }
 
         Plotly.react(chart, [trace], layout, {
             responsive: true,
@@ -601,8 +647,9 @@
         status.classList.remove("error");
         status.textContent =
             `${points.length.toLocaleString()} ${points.length === 1 ? activeType.noun : activeType.nounPlural} plotted` +
+            (unknownCount > 0 ? ` (${unknownCount.toLocaleString()} at Unknown)` : "") +
             (filteredOut > 0 ? ` · ${filteredOut.toLocaleString()} filtered out` : "") +
-            (skipped > 0 ? ` · ${skipped.toLocaleString()} skipped because an axis value is missing` : "");
+            (skipped > 0 ? ` · ${skipped.toLocaleString()} not plotted because an axis value is missing (listed below)` : "");
     }
 
     function bindChartHandlers() {
@@ -621,12 +668,7 @@
                 return;
             }
 
-            selectedAsset = { assetName, packagePath };
-            selectedAssetText.textContent = `${assetName} — ${packagePath}`;
-            bridgeStatus.classList.remove("error");
-            bridgeStatus.textContent = "Ready to send to Unreal Editor.";
-            showInContentBrowserButton.disabled = false;
-            renderDetails(asset);
+            selectAsset(asset, false);
             Plotly.restyle(chart, { selectedpoints: [[point.pointNumber]] }, [point.curveNumber]);
         });
         chart.addEventListener("click", event => {
@@ -658,19 +700,106 @@
         chartHandlersBound = true;
     }
 
+    // Makes asset the selected asset and shows its details in place of the not-plotted list.
+    // fromSkippedList is true when it was picked in that list, which adds a button to return to it.
+    function selectAsset(asset, fromSkippedList) {
+        const assetName = asset.AssetName || `Unnamed ${activeType.noun}`;
+        const packagePath = asset.PackagePath ?? "";
+        selectedAsset = { assetName, packagePath };
+        selectedAssetText.textContent = `${assetName} — ${packagePath}`;
+        bridgeStatus.classList.remove("error");
+        bridgeStatus.textContent = "Ready to send to Unreal Editor.";
+        showInContentBrowserButton.disabled = packagePath === "";
+        skippedPanel.hidden = true;
+        renderDetails(asset, fromSkippedList);
+    }
+
+    // Clears the selection and shows the not-plotted list again in place of the details.
     function clearSelectedAsset() {
         selectedAsset = null;
-        selectedAssetText.textContent = "Click a point in the graph.";
+        selectedAssetText.textContent = skippedRows.length > 0
+            ? `Click a point in the graph or a ${activeType.noun} in the not-plotted list.`
+            : "Click a point in the graph.";
         bridgeStatus.classList.remove("error");
         bridgeStatus.textContent = "";
         showInContentBrowserButton.disabled = true;
         detailsPanel.hidden = true;
         detailsPanel.replaceChildren();
+        renderSkippedList();
+    }
+
+    // Fills the not-plotted panel with the filtered assets that miss an axis value, each with the values it misses.
+    // Clicking an asset shows its details. The panel is hidden when every filtered asset is plotted.
+    function renderSkippedList() {
+        skippedPanel.replaceChildren();
+        if (skippedRows.length === 0) {
+            skippedPanel.hidden = true;
+            return;
+        }
+
+        const count = skippedRows.length;
+        const nounText = count === 1 ? activeType.noun : activeType.nounPlural;
+        const title = document.createElement("h2");
+        title.textContent = `${count.toLocaleString()} ${nounText} not plotted`;
+        const description = document.createElement("p");
+        description.className = "details-path";
+        description.textContent =
+            `These ${nounText} have no value for an axis, so they have no place on the graph. ` +
+            `Click one to see its details.`;
+
+        const scrollBox = document.createElement("div");
+        scrollBox.className = "skipped-list";
+        const table = document.createElement("table");
+        table.className = "details-table";
+        const headerRow = table.createTHead().insertRow();
+        [activeType.noun[0].toUpperCase() + activeType.noun.slice(1), "Path", "Missing value"].forEach(text => {
+            const header = document.createElement("th");
+            header.textContent = text;
+            headerRow.append(header);
+        });
+        const body = table.createTBody();
+        skippedRows.forEach(({ row, missingLabels }) => {
+            const asset = assets[row.assetIndex];
+            const tableRow = body.insertRow();
+
+            const nameButton = document.createElement("button");
+            nameButton.type = "button";
+            nameButton.className = "path-link";
+            nameButton.textContent = asset.AssetName || `Unnamed ${activeType.noun}`;
+            nameButton.title = "Show details";
+            nameButton.addEventListener("click", () => {
+                Plotly.restyle(chart, { selectedpoints: [null] });
+                selectAsset(asset, true);
+                detailsPanel.scrollIntoView({ block: "nearest" });
+            });
+            tableRow.insertCell().append(nameButton);
+
+            const pathCell = tableRow.insertCell();
+            pathCell.className = "path-text";
+            pathCell.textContent = asset.PackagePath ?? "";
+            tableRow.insertCell().textContent = missingLabels.join(", ");
+        });
+        scrollBox.append(table);
+        skippedPanel.append(title, description, scrollBox);
+        skippedPanel.hidden = false;
     }
 
     // Fills the details panel below the graph with the asset's name and path, then the report type's details.
-    function renderDetails(asset) {
+    // withBackButton adds a button that returns to the not-plotted list.
+    function renderDetails(asset, withBackButton = false) {
         detailsPanel.replaceChildren();
+
+        if (withBackButton) {
+            const backButton = document.createElement("button");
+            backButton.type = "button";
+            backButton.className = "path-link details-back";
+            backButton.textContent = `← Back to ${activeType.nounPlural} not plotted`;
+            backButton.addEventListener("click", () => {
+                clearSelectedAsset();
+                skippedPanel.scrollIntoView({ block: "nearest" });
+            });
+            detailsPanel.append(backButton);
+        }
 
         const title = document.createElement("h2");
         title.textContent = asset.AssetName ?? `Unnamed ${activeType.noun}`;
@@ -901,7 +1030,29 @@
         } else if (metric.integerTicks) {
             layout.dtick = 1;
         }
+        if (metric.unknownPlotValue !== undefined) {
+            // Plotly writes negative tick labels with a Unicode minus sign, so both spellings are renamed.
+            const valueText = String(metric.unknownPlotValue);
+            layout.labelalias = {
+                [valueText]: unknownText,
+                [valueText.replace("-", "−")]: unknownText
+            };
+        }
         return layout;
+    }
+
+    // Adds a dotted line across the plot at value on the "x" or "y" axis, labelled Unknown, to layout.
+    function addUnknownGuide(layout, axis, value) {
+        const line = { color: "#9ba4ae", width: 1, dash: "dot" };
+        if (axis === "x") {
+            layout.shapes.push({ type: "line", xref: "x", yref: "paper", x0: value, x1: value, y0: 0, y1: 1, line, layer: "below" });
+            layout.annotations.push({ xref: "x", yref: "paper", x: value, y: 1, yanchor: "bottom", text: unknownText,
+                showarrow: false, font: { color: "#9ba4ae", size: 12 } });
+        } else {
+            layout.shapes.push({ type: "line", xref: "paper", yref: "y", x0: 0, x1: 1, y0: value, y1: value, line, layer: "below" });
+            layout.annotations.push({ xref: "paper", yref: "y", x: 1, y: value, xanchor: "right", yanchor: "bottom",
+                text: unknownText, showarrow: false, font: { color: "#9ba4ae", size: 12 } });
+        }
     }
 
     function clearError() {
