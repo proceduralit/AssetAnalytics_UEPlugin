@@ -8,7 +8,6 @@
 #include "Core/AssetAnalyticsSettings.h"
 #include "Core/AssetAnalyticsUtilities.h"
 #include "AssetRegistry/AssetRegistryModule.h"
-#include "Animation/MeshDeformer.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/SplineMeshComponent.h"
@@ -30,6 +29,7 @@
 #include "Particles/TypeData/ParticleModuleTypeDataBeam2.h"
 #include "Particles/TypeData/ParticleModuleTypeDataMesh.h"
 #include "Particles/TypeData/ParticleModuleTypeDataRibbon.h"
+#include "Hash/CityHash.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
@@ -142,9 +142,6 @@ namespace Material
 		{ TEXT("VolumetricCloud"), EMaterialUserType::VolumetricCloud, MATUSAGE_VolumetricCloud },
 		{ TEXT("HeterogeneousVolumes"), EMaterialUserType::HeterogeneousVolumes, MATUSAGE_HeterogeneousVolumes },
 		{ TEXT("StaticMesh"), EMaterialUserType::StaticMesh, MATUSAGE_StaticMesh },
-		{ TEXT("EditorCompositing"), EMaterialUserType::Count, MATUSAGE_EditorCompositing },
-		{ TEXT("NeuralNetworks"), EMaterialUserType::Count, MATUSAGE_NeuralNetworks },
-		{ TEXT("MeshDeformer"), EMaterialUserType::Count, MATUSAGE_MeshDeformer, EUnregisteredUserLookup::Loading },
 		{ TEXT("Niagara"), EMaterialUserType::Niagara, MATUSAGE_MAX },
 		{ TEXT("Particle"), EMaterialUserType::Particle, MATUSAGE_MAX },
 		{ TEXT("Level"), EMaterialUserType::Level, MATUSAGE_MAX },
@@ -289,6 +286,9 @@ namespace Material
 
 		/** Returns whether the two materials end up with the same value for this property. */
 		bool (*HasSameValue)(const UMaterialInterface& Left, const UMaterialInterface& Right);
+
+		/** Returns Seed combined with the raw bytes of the material's value for this property. */
+		uint64 (*HashValue)(const UMaterialInterface& Material, uint64 Seed);
 	};
 
 	/** Compares two base property values the way UMaterialInstance::GetBasePropertyOverridesHash does. */
@@ -303,7 +303,12 @@ namespace Material
 	{ \
 		TEXT(Name), \
 		[](const FMaterialInstanceBasePropertyOverrides& Overrides) { return Overrides.OverrideFlag != 0; }, \
-		[](const UMaterialInterface& Left, const UMaterialInterface& Right) { return HaveSameBasePropertyValue(Left.Getter(), Right.Getter()); } \
+		[](const UMaterialInterface& Left, const UMaterialInterface& Right) { return HaveSameBasePropertyValue(Left.Getter(), Right.Getter()); }, \
+		[](const UMaterialInterface& Material, const uint64 Seed) \
+		{ \
+			const auto Value = Material.Getter(); \
+			return CityHash64WithSeed(reinterpret_cast<const char*>(&Value), sizeof(Value), Seed); \
+		} \
 	}
 
 	/** The base properties UMaterialInstance::GetBasePropertyOverridesHash puts in a shader map ID, in the same order. */
@@ -324,8 +329,29 @@ namespace Material
 		ASSET_ANALYTICS_BASE_PROPERTY("DisplacementFadeRange", bOverride_DisplacementFadeRange, GetDisplacementFadeRange),
 		ASSET_ANALYTICS_BASE_PROPERTY("MaxWorldPositionOffsetDisplacement", bOverride_MaxWorldPositionOffsetDisplacement, GetMaxWorldPositionOffsetDisplacement),
 		ASSET_ANALYTICS_BASE_PROPERTY("CompatibleWithLumenCardSharing", bOverride_CompatibleWithLumenCardSharing, IsCompatibleWithLumenCardSharing),
-		ASSET_ANALYTICS_BASE_PROPERTY("UsageFlags", bOverride_UsageFlags, GetUsageFlags),
 	};
+
+	/**
+	 * Hashes the base properties whose value in Instance differs from its master's, as the engine does when it builds
+	 * a shader map ID. UE 5.7 does not export UMaterialInstance::GetBasePropertyOverridesHash, so the plugin computes
+	 * its own hash. It only needs equal overrides to give equal hashes; it does not match the engine's value.
+	 * Returns: 0 when no base property differs from the master.
+	 */
+	static uint64 GetBasePropertyOverridesHash(const UMaterialInstance& Instance)
+	{
+		const UMaterial* Master = Instance.GetMaterial();
+		if (Master == nullptr) return 0;
+
+		uint64 Hash = 0;
+		for (int32 PropertyIndex = 0; PropertyIndex < UE_ARRAY_COUNT(BasePropertyChecks); ++PropertyIndex)
+		{
+			const FBasePropertyCheck& BaseProperty = BasePropertyChecks[PropertyIndex];
+			if (BaseProperty.HasSameValue(Instance, *Master)) continue;
+			// Seeding with the property index keeps equal values of different properties apart.
+			Hash = BaseProperty.HashValue(Instance, Hash + PropertyIndex + 1);
+		}
+		return Hash;
+	}
 
 	/**
 	 * Returns the value of a base property as report text, such as "Masked" for the blend mode.
@@ -395,8 +421,9 @@ namespace Material
 
 	/**
 	 * Counts the shaders Material's shader maps compile on ShaderPlatform, from the engine's shader map layout.
-	 * Nothing is compiled: the layout lists every shader type each vertex factory would cache, using conservative
-	 * material parameters, so the count can be slightly higher than a cook. This is the count the material editor's
+	 * Nothing is compiled: the layout lists every shader type each vertex factory would cache, using the
+	 * material's own shader parameters (UE 5.7 has no conservative parameter set), so the count can differ slightly
+	 * from a cook. This is the count the material editor's
 	 * shader stats and the DumpMaterialShaderTypes commandlet use.
 	 * A master covers all its quality shader maps; an instance only covers its active quality level.
 	 * Inputs: CookedPlatform selects the cooked game's shader permutations (nullptr uses the editor's, which adds
@@ -686,7 +713,6 @@ namespace Material
 		TArray<FMaterialUse> Uses;
 		if (SkeletalMesh.GetMorphTargets().Num() > 0) Uses.Add({ MATUSAGE_MorphTargets, {} });
 		if (SkeletalMesh.HasActiveClothingAssets()) Uses.Add({ MATUSAGE_Clothing, {} });
-		if (SkeletalMesh.GetDefaultMeshDeformer() != nullptr) Uses.Add({ MATUSAGE_MeshDeformer, {} });
 		return Uses;
 	}
 
@@ -714,34 +740,10 @@ namespace Material
 		return true;
 	}
 
-	/** Returns whether the package at PackageName hard-references a mesh deformer asset, such as a Deformer Graph. */
-	static bool HasMeshDeformerDependency(IAssetRegistry& AssetRegistry, const FName PackageName)
-	{
-		TSet<FTopLevelAssetPath> DeformerClasses;
-		AssetRegistry.GetDerivedClassNames({ UMeshDeformer::StaticClass()->GetClassPathName() }, {}, DeformerClasses);
-
-		TArray<FName> Dependencies;
-		AssetRegistry.GetDependencies(
-			PackageName,
-			Dependencies,
-			UE::AssetRegistry::EDependencyCategory::Package,
-			UE::AssetRegistry::FDependencyQuery(UE::AssetRegistry::EDependencyQuery::Hard));
-		for (const FName Dependency : Dependencies)
-		{
-			TArray<FAssetData> DependencyAssets;
-			AssetRegistry.GetAssetsByPackageName(Dependency, DependencyAssets);
-			for (const FAssetData& DependencyAsset : DependencyAssets)
-			{
-				if (DeformerClasses.Contains(DependencyAsset.AssetClassPath)) return true;
-			}
-		}
-		return false;
-	}
-
 	/**
 	 * Finds the same uses as FindSkeletalMeshUses for a skeletal mesh that is not loaded, without loading it, so
 	 * its render data, skeleton, physics asset, materials and textures stay on disk. Morph targets come from the
-	 * Asset Registry tag, the mesh deformer from the mesh's dependencies, and clothing from its package header.
+	 * Asset Registry tag and clothing from its package header.
 	 * Clothing assets count even when no mesh section uses them, unlike USkeletalMesh::HasActiveClothingAssets.
 	 * Output: Fills OutUses when it returns true.
 	 * Returns: False when the asset is not an unloaded skeletal mesh or its data cannot be read this way, so the
@@ -763,7 +765,7 @@ namespace Material
 			{
 				bHasObjects = true;
 				return false;
-			}, EGetObjectsFlags::None);
+			}, false);
 			if (bHasObjects || ExistingPackage->GetLinker() != nullptr) return false;
 		}
 
@@ -773,7 +775,6 @@ namespace Material
 		OutUses.Reset();
 		if (MorphTargetCount > 0) OutUses.Add({ MATUSAGE_MorphTargets, {} });
 		if (bHasClothing) OutUses.Add({ MATUSAGE_Clothing, {} });
-		if (HasMeshDeformerDependency(AssetRegistry, UserData.PackageName)) OutUses.Add({ MATUSAGE_MeshDeformer, {} });
 		return true;
 	}
 
@@ -1229,7 +1230,7 @@ namespace Material
 				}
 				if (!bWasAssetLoaded) ++LoadedAssetCount;
 
-				FStaticPermutationKey Key = MakePermutationKey(*Instance, Instance->GetBasePropertyOverridesHash());
+				FStaticPermutationKey Key = MakePermutationKey(*Instance, GetBasePropertyOverridesHash(*Instance));
 				FInstancePermutationRow& Row = Item.InstancePermutationRows.AddDefaulted_GetRef();
 				Row.Path = InstanceData.GetObjectPathString();
 				if (Instance->Parent != nullptr) ReadInstancePermutationCells(*MasterMaterial, *Instance, Key, Item, Row);
