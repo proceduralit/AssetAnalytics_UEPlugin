@@ -722,7 +722,7 @@ namespace Mesh
 				const FString LeftName = Left.AssetData.AssetName.ToString();
 				const FString RightName = Right.AssetData.AssetName.ToString();
 				if (LeftName != RightName) return LeftName < RightName;
-				return Left.AssetData.ObjectPath.LexicalLess(Right.AssetData.ObjectPath);
+				return Left.AssetData.GetSoftObjectPath().LexicalLess(Right.AssetData.GetSoftObjectPath());
 			});
 
 			const FString ReportDirectory = FPaths::Combine(
