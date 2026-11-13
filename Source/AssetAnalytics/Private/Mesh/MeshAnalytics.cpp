@@ -16,6 +16,7 @@
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
+#include "Interfaces/Interface_AsyncCompilation.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -428,6 +429,16 @@ namespace Mesh
 		return Item;
 	}
 
+	/**
+	 * Returns whether MeshAsset is still building its render data, such as Nanite data after a cache miss.
+	 * Reading a mesh while it builds blocks the editor until the build finishes.
+	 */
+	static bool IsMeshBuilding(UObject* MeshAsset)
+	{
+		const IInterface_AsyncCompilation* AsyncCompilation = Cast<IInterface_AsyncCompilation>(MeshAsset);
+		return AsyncCompilation != nullptr && AsyncCompilation->IsCompiling();
+	}
+
 	/** Gathers the Mesh Analytics report over several editor ticks and saves it when done. */
 	class FMeshAnalyticsRunner
 	{
@@ -469,6 +480,8 @@ namespace Mesh
 			FindMeshes,
 			/** Fills report rows within a per-tick time budget. */
 			ProcessMeshes,
+			/** Waits without blocking until the batch's meshes finish building, then fills their rows. */
+			WaitForMeshBuilds,
 			/** Unloads the packages loaded by the finished batch. */
 			UnloadPackages
 		};
@@ -487,11 +500,23 @@ namespace Mesh
 				FText::FromString(CurrentAssetName)));
 		}
 
+		/** Tells the user how many meshes of the batch are still building, naming one of them. */
+		void UpdateMeshBuildNotification() const
+		{
+			ProgressNotification.SetText(FText::Format(
+				LOCTEXT("WaitingForMeshBuilds", "Mesh Analytics - {0} / {1}\nWaiting for {2} meshes to finish building Nanite and render data...\n{3}"),
+				FText::AsNumber(NextAssetIndex),
+				FText::AsNumber(PendingAssets.Num()),
+				FText::AsNumber(MeshesWaitingForBuild.Num()),
+				FText::FromName(MeshesWaitingForBuild[0].AssetData.AssetName)));
+		}
+
 		/** Clears pending assets, finished rows and the batch state. */
 		void ResetReportData()
 		{
 			PendingAssets.Reset();
 			AssetItems.Reset();
+			MeshesWaitingForBuild.Reset();
 			NextAssetIndex = 0;
 			AssetsInBatch = 0;
 			BatchLoadedAssetCount = 0;
@@ -564,6 +589,7 @@ namespace Mesh
 
 		/**
 		 * Fills the report row of one mesh asset, loading it only for columns that require it.
+		 * A loaded mesh that is still building is added to MeshesWaitingForBuild instead, and gets its row once built.
 		 * Returns: True when this call loaded the asset from disk.
 		 */
 		bool ProcessMeshAsset(IAssetRegistry& AssetRegistry, const UAssetAnalyticsSettings& Settings, const FAssetData& AssetData)
@@ -578,8 +604,60 @@ namespace Mesh
 				bWasAssetLoaded = AssetData.IsAssetLoaded();
 				MeshAsset = AssetData.GetAsset();
 			}
-			AssetItems.Add(MakeMeshAssetData(AssetRegistry, AssetData, MeshAsset, Settings));
+			if (IsMeshBuilding(MeshAsset)) MeshesWaitingForBuild.Add({ AssetData, MeshAsset });
+			else AssetItems.Add(MakeMeshAssetData(AssetRegistry, AssetData, MeshAsset, Settings));
 			return !bWasAssetLoaded && MeshAsset != nullptr;
+		}
+
+		/**
+		 * Starts unloading the finished batch on the next tick when it loaded any meshes.
+		 * Returns: True when the unload step was started; false when the batch loaded nothing and was reset.
+		 */
+		bool TryStartUnloadingBatch()
+		{
+			if (BatchLoadedAssetCount == 0)
+			{
+				AssetsInBatch = 0;
+				return false;
+			}
+			// Unloading can take a while, so it gets its own tick and message.
+			PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
+			Step = ERunnerStep::UnloadPackages;
+			ProgressNotification.SetText(FText::Format(
+				LOCTEXT("UnloadingMeshPackages", "Mesh Analytics - {0} / {1}\nUnloading {2} packages..."),
+				FText::AsNumber(NextAssetIndex),
+				FText::AsNumber(PendingAssets.Num()),
+				FText::AsNumber(PackageUnloader.GetTrackedPackageCount())));
+			return true;
+		}
+
+		/**
+		 * Fills the rows of waiting meshes whose builds have finished, without waiting for the others.
+		 * Once none are left, ends the batch and goes back to processing meshes or unloading the batch.
+		 * Returns: True, since the report is still running.
+		 */
+		bool GatherBuiltMeshes(IAssetRegistry& AssetRegistry, const UAssetAnalyticsSettings& Settings)
+		{
+			for (int32 WaitingIndex = MeshesWaitingForBuild.Num() - 1; WaitingIndex >= 0; --WaitingIndex)
+			{
+				const FMeshWaitingForBuild& WaitingMesh = MeshesWaitingForBuild[WaitingIndex];
+				// A mesh that is no longer loaded still gets the row its registry data gives.
+				UObject* MeshAsset = WaitingMesh.MeshAsset.Get();
+				if (IsMeshBuilding(MeshAsset)) continue;
+				AssetItems.Add(MakeMeshAssetData(AssetRegistry, WaitingMesh.AssetData, MeshAsset, Settings));
+				MeshesWaitingForBuild.RemoveAtSwap(WaitingIndex);
+			}
+			if (MeshesWaitingForBuild.Num() > 0)
+			{
+				UpdateMeshBuildNotification();
+				return true;
+			}
+
+			if (TryStartUnloadingBatch()) return true;
+			// The next ProcessMeshes tick completes the report when this was the last batch.
+			Step = ERunnerStep::ProcessMeshes;
+			UpdateProgressNotification();
+			return true;
 		}
 
 		/**
@@ -611,19 +689,14 @@ namespace Mesh
 				const bool bBatchFinished = AssetsInBatch >= AssetsPerBatch || NextAssetIndex >= PendingAssets.Num();
 				if (bBatchFinished)
 				{
-					if (BatchLoadedAssetCount > 0)
+					// The batch stays loaded until its building meshes are gathered, polled each tick so the editor stays responsive.
+					if (MeshesWaitingForBuild.Num() > 0)
 					{
-						// Unloading can take a while, so it gets its own tick and message.
-						PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
-						Step = ERunnerStep::UnloadPackages;
-						ProgressNotification.SetText(FText::Format(
-							LOCTEXT("UnloadingMeshPackages", "Mesh Analytics - {0} / {1}\nUnloading {2} packages..."),
-							FText::AsNumber(NextAssetIndex),
-							FText::AsNumber(PendingAssets.Num()),
-							FText::AsNumber(PackageUnloader.GetTrackedPackageCount())));
+						Step = ERunnerStep::WaitForMeshBuilds;
+						UpdateMeshBuildNotification();
 						return true;
 					}
-					AssetsInBatch = 0;
+					if (TryStartUnloadingBatch()) return true;
 				}
 				if (FPlatformTime::Seconds() - TickStartSeconds >= TickTimeBudgetSeconds) break;
 			}
@@ -689,6 +762,9 @@ namespace Mesh
 
 			case ERunnerStep::ProcessMeshes:
 				return ProcessMeshesForOneTick(AssetRegistry, *Settings);
+
+			case ERunnerStep::WaitForMeshBuilds:
+				return GatherBuiltMeshes(AssetRegistry, *Settings);
 
 			case ERunnerStep::UnloadPackages:
 				PackageUnloader.UnloadReportPackages();
@@ -853,8 +929,19 @@ namespace Mesh
 		static constexpr double NotificationDisplayDelaySeconds = 0.2;
 		/** Longest time one tick spends processing assets before letting the editor repaint. */
 		static constexpr double TickTimeBudgetSeconds = 0.05;
+		/** A loaded mesh of the current batch whose render data is still building. */
+		struct FMeshWaitingForBuild
+		{
+			/** Registry entry of the mesh. */
+			FAssetData AssetData;
+			/** The loaded mesh, read once its build finishes. */
+			TWeakObjectPtr<UObject> MeshAsset;
+		};
+
 		/** Report rows gathered so far, one per processed mesh. */
 		TArray<FMeshAssetData> AssetItems;
+		/** Meshes of the current batch still building; the batch is not unloaded until they are gathered. */
+		TArray<FMeshWaitingForBuild> MeshesWaitingForBuild;
 		/** Meshes found in the configured folders, processed in order. */
 		TArray<FAssetData> PendingAssets;
 		/** Unloads the packages each batch loaded. */
