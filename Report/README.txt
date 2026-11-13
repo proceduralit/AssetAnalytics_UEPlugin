@@ -12,13 +12,22 @@ switches to the report type of the JSON you load.
    every active condition; multiple text values within one condition are ORed
    together.
 4. Use the X-Axis and Y-Axis menus to compare different numeric parameters.
+   A material whose users the report could not list is plotted as a hollow
+   grey point on the dotted Unknown line next to 0 Total Users. It may still
+   be used by levels, widgets or other assets the report does not check.
+   Total Users filters do not match these materials.
+   Assets with no value for another axis are listed below the graph when
+   nothing is selected; click one to show its details.
 5. Use Box Zoom in the graph toolbar to draw one zoom rectangle. The graph then
    returns to pan mode automatically; Home restores the full view.
 6. Click a point to show the asset's details below the graph: for a mesh, the
    materials it references and the textures they use; for a material, its
    vertex factories and instances, followed by a colour-coded grid of every
-   instance's base property overrides and static parameters. Click an empty
-   area of the graph to clear the selection.
+   instance's base property overrides and static parameters. Under each
+   parameter name, the yellow number counts instances that override it with
+   their parent's value and the red number counts instances that override it
+   with a different value. Click an empty area of the graph to clear the
+   selection.
 7. Press Show in Content Browser, or click an asset path in the details, to
    select that asset in an open Unreal Editor. The editor plugin must be loaded
    for this to work.

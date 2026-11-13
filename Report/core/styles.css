@@ -467,6 +467,33 @@ h1 {
     word-break: break-all;
 }
 
+/* Assets that pass the filters but miss an axis value, listed below the graph when nothing is selected. */
+.skipped-list {
+    max-height: 360px;
+    margin-top: 14px;
+    overflow-y: auto;
+}
+
+.skipped-list th {
+    position: sticky;
+    top: 0;
+    background: #171b20;
+}
+
+.skipped-list td.path-text {
+    word-break: break-all;
+}
+
+.skipped-list th:last-child,
+.skipped-list td:last-child {
+    white-space: nowrap;
+}
+
+/* Returns from an asset picked in the not-plotted list to the list. */
+.details-back {
+    margin-bottom: 12px;
+}
+
 .details-summary {
     display: flex;
     flex-wrap: wrap;
@@ -594,6 +621,8 @@ h1 {
     max-width: 160px;
     background: #171b20;
     overflow-wrap: anywhere;
+    /* Keeps the override counts in one line when some parameter names wrap. */
+    vertical-align: bottom;
 }
 
 .permutation-grid tbody th {
@@ -622,6 +651,25 @@ h1 {
 .grid-swatch.changed,
 .grid-cell.changed { background: #4a1f24; color: #ff9a9a; font-weight: 600; }
 .grid-cell.inherited { background: #183a2c; color: #7be0b0; font-style: italic; }
+
+/* Override counts under each parameter name in the instance grid header. */
+.grid-override-counts {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.grid-count {
+    padding: 1px 7px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.grid-count.same-as-parent { background: #4a3a1a; color: #ffd27a; }
+.grid-count.changed { background: #4a1f24; color: #ff9a9a; }
+.grid-count.none { color: #65717d; font-weight: 400; }
 
 @media (max-width: 760px) {
     .report-shell {
