@@ -176,7 +176,7 @@ namespace Material
 		/** Identifies the parameter, including its layer when it comes from a material layer. Base properties only set Name. */
 		FMaterialParameterInfo ParameterInfo;
 
-		/** Value the master uses when an instance does not override it, as report text. Empty for base properties other than the blend mode. */
+		/** Value the master uses when an instance does not override it, as report text. */
 		FString DefaultValue;
 
 		/** Counted instances whose own override gives a value different from their parent's. */
@@ -192,7 +192,7 @@ namespace Material
 		/** Index of the parameter in FMaterialAssetData::PermutationParameters. */
 		int32 ParameterIndex = INDEX_NONE;
 
-		/** Value the instance ends up with, as report text. Base properties other than the blend mode only say whether they differ from the master. */
+		/** Value the instance ends up with, as report text. */
 		FString Value;
 
 		/** Whether the instance's own overrides set this parameter, rather than inheriting it from its parent. */
@@ -289,6 +289,9 @@ namespace Material
 
 		/** Returns Seed combined with the raw bytes of the material's value for this property. */
 		uint64 (*HashValue)(const UMaterialInterface& Material, uint64 Seed);
+
+		/** Returns the material's value for this property as report text, such as "Masked" or "True". */
+		FString (*ValueText)(const UMaterialInterface& Material);
 	};
 
 	/** Compares two base property values the way UMaterialInstance::GetBasePropertyOverridesHash does. */
@@ -297,6 +300,43 @@ namespace Material
 	{
 		if constexpr (std::is_floating_point_v<ValueType>) return FMath::IsNearlyEqual(Left, Right);
 		else return !(Left != Right);
+	}
+
+	/** Formats a base property value as report text. One overload per value type the base property getters return. */
+	static FString FormatBasePropertyValue(const bool bValue) { return bValue ? TEXT("True") : TEXT("False"); }
+	static FString FormatBasePropertyValue(const float Value) { return FString::SanitizeFloat(Value, 0); }
+
+	static FString FormatBasePropertyValue(const EBlendMode BlendMode)
+	{
+		return StaticEnum<EBlendMode>()->GetDisplayNameTextByValue(BlendMode).ToString();
+	}
+
+	/** Lists every shading model in the field, such as "Default Lit, Subsurface". */
+	static FString FormatBasePropertyValue(const FMaterialShadingModelField ShadingModels)
+	{
+		TArray<FString> ShadingModelNames;
+		for (int32 ShadingModel = 0; ShadingModel < MSM_NUM; ++ShadingModel)
+		{
+			if (!ShadingModels.HasShadingModel(static_cast<EMaterialShadingModel>(ShadingModel))) continue;
+			ShadingModelNames.Add(StaticEnum<EMaterialShadingModel>()->GetDisplayNameTextByValue(ShadingModel).ToString());
+		}
+		return FString::Join(ShadingModelNames, TEXT(", "));
+	}
+
+	static FString FormatBasePropertyValue(const FDisplacementScaling& Scaling)
+	{
+		return FString::Printf(
+			TEXT("Magnitude %s, Center %s"),
+			*FString::SanitizeFloat(Scaling.Magnitude, 0),
+			*FString::SanitizeFloat(Scaling.Center, 0));
+	}
+
+	static FString FormatBasePropertyValue(const FDisplacementFadeRange& FadeRange)
+	{
+		return FString::Printf(
+			TEXT("Start %s px, End %s px"),
+			*FString::SanitizeFloat(FadeRange.StartSizePixels, 0),
+			*FString::SanitizeFloat(FadeRange.EndSizePixels, 0));
 	}
 
 #define ASSET_ANALYTICS_BASE_PROPERTY(Name, OverrideFlag, Getter) \
@@ -308,7 +348,8 @@ namespace Material
 		{ \
 			const auto Value = Material.Getter(); \
 			return CityHash64WithSeed(reinterpret_cast<const char*>(&Value), sizeof(Value), Seed); \
-		} \
+		}, \
+		[](const UMaterialInterface& Material) { return FormatBasePropertyValue(Material.Getter()); } \
 	}
 
 	/** The base properties UMaterialInstance::GetBasePropertyOverridesHash puts in a shader map ID, in the same order. */
@@ -351,19 +392,6 @@ namespace Material
 			Hash = BaseProperty.HashValue(Instance, Hash + PropertyIndex + 1);
 		}
 		return Hash;
-	}
-
-	/**
-	 * Returns the value of a base property as report text, such as "Masked" for the blend mode.
-	 * Returns an empty string for properties the report only shows as changed or not.
-	 */
-	static FString GetBasePropertyValueText(const FBasePropertyCheck& BaseProperty, const UMaterialInterface& Material)
-	{
-		if (FCString::Strcmp(BaseProperty.Name, TEXT("BlendMode")) == 0)
-		{
-			return StaticEnum<EBlendMode>()->GetDisplayNameTextByValue(Material.GetBlendMode()).ToString();
-		}
-		return FString();
 	}
 
 #undef ASSET_ANALYTICS_BASE_PROPERTY
@@ -1099,7 +1127,7 @@ namespace Material
 				FPermutationParameterSummary& Summary = Item.PermutationParameters.AddDefaulted_GetRef();
 				Summary.Kind = EPermutationParameterKind::BaseProperty;
 				Summary.ParameterInfo.Name = BaseProperty.Name;
-				Summary.DefaultValue = GetBasePropertyValueText(BaseProperty, MasterMaterial);
+				Summary.DefaultValue = BaseProperty.ValueText(MasterMaterial);
 			}
 		}
 
@@ -1178,10 +1206,9 @@ namespace Material
 				FMaterialParameterInfo PropertyInfo;
 				PropertyInfo.Name = BaseProperty.Name;
 				const bool bDiffersFromMaster = !BaseProperty.HasSameValue(Instance, MasterMaterial);
-				const FString ValueText = GetBasePropertyValueText(BaseProperty, Instance);
 				AddCell(
 					FindParameterIndex(EPermutationParameterKind::BaseProperty, PropertyInfo),
-					!ValueText.IsEmpty() ? ValueText : bDiffersFromMaster ? TEXT("Changed") : TEXT("Master's"),
+					BaseProperty.ValueText(Instance),
 					BaseProperty.IsOverridden(Instance.BasePropertyOverrides),
 					bDiffersFromMaster,
 					BaseProperty.HasSameValue(Instance, Parent));
