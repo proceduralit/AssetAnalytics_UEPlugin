@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 #include "Core/AssetAnalyticsPackageUnloader.h"
-#include "PackageTools.h"
+#include "Editor.h"
+#include "Engine/Selection.h"
+#include "Engine/World.h"
+#include "RenderingThread.h"
+#include "Subsystems/AssetEditorSubsystem.h"
+#include "UObject/GarbageCollection.h"
+#include "UObject/MetaData.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UObjectHash.h"
@@ -42,6 +48,112 @@ namespace Core
 	}
 
 	/**
+	 * Unloads Packages with a single garbage collection. It follows UE 4.27's UPackageTools::UnloadPackages, but
+	 * that function runs a full garbage collection and ResetLoaders per package, which takes hours for the tens of
+	 * thousands of packages a report batch can load. UE 5 prepares every package and collects once, as here.
+	 * Packages with unsaved changes and packages holding a world are left loaded.
+	 * Output: OutErrorMessage lists the packages with unsaved changes that were left loaded.
+	 * Returns: Whether any package was unloaded.
+	 */
+	static bool UnloadPackagesWithOneGarbageCollection(const TArray<UPackage*>& Packages, FText& OutErrorMessage)
+	{
+		TArray<UPackage*> PackagesToUnload;
+		TArray<FString> DirtyPackageNames;
+		for (UPackage* Package : Packages)
+		{
+			if (Package == nullptr) continue;
+			if (Package->IsDirty())
+			{
+				DirtyPackageNames.Add(Package->GetName());
+				continue;
+			}
+			// The report never needs to unload a level; the engine's version would replace the editor world.
+			if (UWorld::FindWorldInPackage(Package) != nullptr) continue;
+			PackagesToUnload.AddUnique(Package);
+		}
+		if (DirtyPackageNames.Num() > 0)
+		{
+			OutErrorMessage = FText::FromString(FString::Printf(
+				TEXT("These packages have unsaved changes and were left loaded: %s"),
+				*FString::Join(DirtyPackageNames, TEXT(", "))));
+		}
+		if (PackagesToUnload.Num() == 0) return false;
+
+		// Complete any load or streaming request first, as the engine does before unloading.
+		FlushAsyncLoading();
+		(*GFlushStreamingFunc)();
+		GEditor->GetSelectedObjects()->DeselectAll();
+
+		// Clear RF_Standalone so the packages' assets can be collected; remember which objects had it.
+		TArray<UObject*> ObjectsThatHadStandaloneCleared;
+		UAssetEditorSubsystem* AssetEditorSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+		bool bScriptPackageUnloaded = false;
+		for (UPackage* Package : PackagesToUnload)
+		{
+			ForEachObjectWithPackage(Package, [AssetEditorSubsystem, &ObjectsThatHadStandaloneCleared](UObject* Object)
+			{
+				if (Object->IsAsset()) AssetEditorSubsystem->CloseAllEditorsForAsset(Object);
+				if (Object->HasAnyFlags(RF_Standalone))
+				{
+					Object->ClearFlags(RF_Standalone);
+					ObjectsThatHadStandaloneCleared.Add(Object);
+				}
+				return true;
+			}, false);
+
+			// Package metadata keeps its package alive through RF_Standalone, so it is cleared too.
+			if (Package->MetaData != nullptr && Package->MetaData->HasAnyFlags(RF_Standalone))
+			{
+				Package->MetaData->ClearFlags(RF_Standalone);
+				ObjectsThatHadStandaloneCleared.Add(Package->MetaData);
+			}
+
+			Package->bHasBeenFullyLoaded = false;
+			Package->ClearFlags(RF_WasLoaded);
+			if (Package->HasAnyPackageFlags(PKG_ContainsScript)) bScriptPackageUnloaded = true;
+			// ResetLoaders is deliberately not called: it reads all of the package's bulk data (texture and mesh
+			// source) from disk before detaching the file, which takes minutes for thousands of packages. Packages
+			// that the collection deletes detach their file in UPackage::BeginDestroy without reading it, and
+			// packages that survive keep their file attached, like any other loaded asset.
+		}
+
+		// Objects that something else still references survive the collection and get RF_Standalone back,
+		// as UPackageTools::RestoreStandaloneOnReachableObjects does.
+		const FDelegateHandle ReachabilityHandle = FCoreUObjectDelegates::PostReachabilityAnalysis.AddLambda(
+			[&ObjectsThatHadStandaloneCleared]()
+			{
+				for (UObject* Object : ObjectsThatHadStandaloneCleared)
+				{
+					if (!Object->IsUnreachable()) Object->SetFlags(RF_Standalone);
+				}
+			});
+
+		// Names are kept because the collection deletes the unloaded package objects.
+		TArray<FString> PackageNamesToUnload;
+		PackageNamesToUnload.Reserve(PackagesToUnload.Num());
+		for (const UPackage* Package : PackagesToUnload)
+		{
+			PackageNamesToUnload.Add(Package->GetName());
+		}
+		PackagesToUnload.Reset();
+
+		// Unloading may invalidate render resources.
+		FlushRenderingCommands();
+		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+		FCoreUObjectDelegates::PostReachabilityAnalysis.Remove(ReachabilityHandle);
+
+		// Packages that survived may have been marked dirty by callbacks during the collection.
+		for (const FString& PackageName : PackageNamesToUnload)
+		{
+			UPackage* SurvivingPackage = FindPackage(nullptr, *PackageName);
+			if (SurvivingPackage != nullptr && SurvivingPackage->IsDirty()) SurvivingPackage->SetDirtyFlag(false);
+		}
+
+		if (bScriptPackageUnloaded) GEditor->BroadcastClassPackageLoadedOrUnloaded();
+		return true;
+	}
+
+	/**
 	 * Unloads the tracked packages and clears the list.
 	 * Output: Logs a warning for unload errors and for packages that stay loaded.
 	 */
@@ -56,9 +168,9 @@ namespace Core
 			if (Package != nullptr) PackageNames.AddUnique(Package->GetFName());
 		}
 
-		// UE 4.27's UnloadPackages keeps the user's undo history; the report never transacts on the packages it loads.
+		// The report never transacts on the packages it loads, so the user's undo history is kept.
 		FText UnloadError;
-		const bool bPackagesChanged = UPackageTools::UnloadPackages(PackagesLoadedForReport, UnloadError);
+		const bool bPackagesChanged = UnloadPackagesWithOneGarbageCollection(PackagesLoadedForReport, UnloadError);
 		PackagesLoadedForReport.Reset();
 
 		TArray<FString> RemainingPackageNames;
