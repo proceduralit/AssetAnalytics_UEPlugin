@@ -35,7 +35,8 @@ namespace Core
 		{
 			UPackage* Package = static_cast<UPackage*>(Object);
 			if (PackagesBefore.Contains(Package)) return;
-			if (Package->HasAnyPackageFlags(PKG_CompiledIn) || Package->GetLoadedPath().IsEmpty()) return;
+			// FileName is set when a package is loaded from disk, so packages created in memory are skipped.
+			if (Package->HasAnyPackageFlags(PKG_CompiledIn) || Package->FileName.IsNone()) return;
 			PackagesLoadedForReport.AddUnique(Package);
 		}, false);
 	}
@@ -55,11 +56,9 @@ namespace Core
 			if (Package != nullptr) PackageNames.AddUnique(Package->GetFName());
 		}
 
-		// Keep the user's undo history; the report never transacts on the packages it loads.
-		UPackageTools::FUnloadPackageParams UnloadParams(PackagesLoadedForReport);
-		UnloadParams.bResetTransBuffer = false;
-		const bool bPackagesChanged = UPackageTools::UnloadPackages(UnloadParams);
-		const FText& UnloadError = UnloadParams.OutErrorMessage;
+		// UE 4.27's UnloadPackages keeps the user's undo history; the report never transacts on the packages it loads.
+		FText UnloadError;
+		const bool bPackagesChanged = UPackageTools::UnloadPackages(PackagesLoadedForReport, UnloadError);
 		PackagesLoadedForReport.Reset();
 
 		TArray<FString> RemainingPackageNames;

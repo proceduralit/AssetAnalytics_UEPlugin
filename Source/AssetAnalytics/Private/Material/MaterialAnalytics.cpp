@@ -40,14 +40,16 @@
 #include "MaterialCachedData.h"
 #include "MaterialShaderQualitySettings.h"
 #include "MaterialShared.h"
-#include "DataDrivenShaderPlatformInfo.h"
-#include "RHIShaderPlatform.h"
+#include "MaterialShader.h"
+#include "MeshMaterialShader.h"
+#include "RHI.h"
 #include "SceneTypes.h"
+#include "Shader.h"
 #include "ShaderPlatformQualitySettings.h"
 #include "StaticParameterSet.h"
+#include "VertexFactory.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
-#include "Misc/PackagePath.h"
 #include "UObject/LinkerLoad.h"
 #include "Misc/Paths.h"
 #include "Policies/PrettyJsonPrintPolicy.h"
@@ -64,7 +66,6 @@ namespace Material
 	enum class EMaterialUserType : uint8
 	{
 		StaticMesh,
-		Nanite,
 		SkeletalMesh,
 		InstancedStaticMeshes,
 		Niagara,
@@ -75,7 +76,6 @@ namespace Material
 		LidarPointCloud,
 		Water,
 		VolumetricCloud,
-		HeterogeneousVolumes,
 		VirtualHeightfieldMesh,
 		Level,
 		Blueprint,
@@ -114,8 +114,9 @@ namespace Material
 	};
 
 	/**
-	 * Every entry written under VertexFactories: all EMaterialUsage flags in engine order,
-	 * then the user types that do not match a single usage flag.
+	 * Every entry written under VertexFactories: all UE 4.27 EMaterialUsage flags in engine order,
+	 * then the user types that do not match a single usage flag. UE 4.27 has no static mesh or volumetric cloud
+	 * usage flag, so those two only list their registry users.
 	 */
 	static const FVertexFactoryEntry VertexFactoryEntries[] =
 	{
@@ -137,11 +138,8 @@ namespace Material
 		{ TEXT("HairStrands"), EMaterialUserType::HairStrands, MATUSAGE_HairStrands },
 		{ TEXT("LidarPointCloud"), EMaterialUserType::LidarPointCloud, MATUSAGE_LidarPointCloud },
 		{ TEXT("VirtualHeightfieldMesh"), EMaterialUserType::VirtualHeightfieldMesh, MATUSAGE_VirtualHeightfieldMesh },
-		{ TEXT("Nanite"), EMaterialUserType::Nanite, MATUSAGE_Nanite },
-		{ TEXT("Voxels"), EMaterialUserType::Count, MATUSAGE_Voxels },
-		{ TEXT("VolumetricCloud"), EMaterialUserType::VolumetricCloud, MATUSAGE_VolumetricCloud },
-		{ TEXT("HeterogeneousVolumes"), EMaterialUserType::HeterogeneousVolumes, MATUSAGE_HeterogeneousVolumes },
-		{ TEXT("StaticMesh"), EMaterialUserType::StaticMesh, MATUSAGE_StaticMesh },
+		{ TEXT("VolumetricCloud"), EMaterialUserType::VolumetricCloud, MATUSAGE_MAX },
+		{ TEXT("StaticMesh"), EMaterialUserType::StaticMesh, MATUSAGE_MAX },
 		{ TEXT("Niagara"), EMaterialUserType::Niagara, MATUSAGE_MAX },
 		{ TEXT("Particle"), EMaterialUserType::Particle, MATUSAGE_MAX },
 		{ TEXT("Level"), EMaterialUserType::Level, MATUSAGE_MAX },
@@ -267,11 +265,25 @@ namespace Material
 		/** Hash of the base properties that differ from the master's, such as blend mode or two sided; 0 when none do. */
 		uint64 BasePropertyOverridesHash = 0;
 
-		/** Returns whether Other compiles the same shader map as this key. */
+		/**
+		 * Returns whether Other compiles the same shader map as this key. UE 4.27 does not export
+		 * FStaticParameterSet::Equivalent, so the static switches and component masks are compared here the same way:
+		 * as sets, ignoring order. Both keys come from MakePermutationKey, so their bOverride flags are all cleared.
+		 */
 		bool CompilesSameShaders(const FStaticPermutationKey& Other) const
 		{
+			auto HaveSameParameters = [](const auto& Left, const auto& Right)
+			{
+				if (Left.Num() != Right.Num()) return false;
+				for (const auto& Parameter : Left)
+				{
+					if (!Right.Contains(Parameter)) return false;
+				}
+				return true;
+			};
 			return BasePropertyOverridesHash == Other.BasePropertyOverridesHash &&
-				StaticParameters.Equivalent(Other.StaticParameters);
+				HaveSameParameters(StaticParameters.StaticSwitchParameters, Other.StaticParameters.StaticSwitchParameters) &&
+				HaveSameParameters(StaticParameters.StaticComponentMaskParameters, Other.StaticParameters.StaticComponentMaskParameters);
 		}
 	};
 
@@ -298,8 +310,23 @@ namespace Material
 	template <typename ValueType>
 	static bool HaveSameBasePropertyValue(const ValueType& Left, const ValueType& Right)
 	{
-		if constexpr (std::is_floating_point_v<ValueType>) return FMath::IsNearlyEqual(Left, Right);
-		else return !(Left != Right);
+		return !(Left != Right);
+	}
+
+	/** Compares floating point base properties with the engine's tolerance. Picked over the template for float values. */
+	static bool HaveSameBasePropertyValue(const float Left, const float Right)
+	{
+		return FMath::IsNearlyEqual(Left, Right, SMALL_NUMBER);
+	}
+
+	/**
+	 * Returns whether Material casts dynamic shadows as masked. UE 4.27's UMaterialInstance does not override
+	 * GetCastDynamicShadowAsMasked, so instances read the value they cache from their overrides and parent.
+	 */
+	static bool GetCastDynamicShadowAsMaskedValue(const UMaterialInterface& Material)
+	{
+		if (const UMaterialInstance* Instance = Cast<UMaterialInstance>(&Material)) return Instance->bCastDynamicShadowAsMasked;
+		return Material.GetCastDynamicShadowAsMasked();
 	}
 
 	/** Formats a base property value as report text. One overload per value type the base property getters return. */
@@ -323,58 +350,41 @@ namespace Material
 		return FString::Join(ShadingModelNames, TEXT(", "));
 	}
 
-	static FString FormatBasePropertyValue(const FDisplacementScaling& Scaling)
-	{
-		return FString::Printf(
-			TEXT("Magnitude %s, Center %s"),
-			*FString::SanitizeFloat(Scaling.Magnitude, 0),
-			*FString::SanitizeFloat(Scaling.Center, 0));
-	}
-
-	static FString FormatBasePropertyValue(const FDisplacementFadeRange& FadeRange)
-	{
-		return FString::Printf(
-			TEXT("Start %s px, End %s px"),
-			*FString::SanitizeFloat(FadeRange.StartSizePixels, 0),
-			*FString::SanitizeFloat(FadeRange.EndSizePixels, 0));
-	}
-
-#define ASSET_ANALYTICS_BASE_PROPERTY(Name, OverrideFlag, Getter) \
+	/**
+	 * Builds one BasePropertyChecks entry. ReadValue is an expression that reads the property from a
+	 * const UMaterialInterface& named Material, such as Material.GetBlendMode().
+	 */
+#define ASSET_ANALYTICS_BASE_PROPERTY(Name, OverrideFlag, ReadValue) \
 	{ \
 		TEXT(Name), \
 		[](const FMaterialInstanceBasePropertyOverrides& Overrides) { return Overrides.OverrideFlag != 0; }, \
-		[](const UMaterialInterface& Left, const UMaterialInterface& Right) { return HaveSameBasePropertyValue(Left.Getter(), Right.Getter()); }, \
+		[](const UMaterialInterface& Left, const UMaterialInterface& Right) \
+		{ \
+			auto Read = [](const UMaterialInterface& Material) { return ReadValue; }; \
+			return HaveSameBasePropertyValue(Read(Left), Read(Right)); \
+		}, \
 		[](const UMaterialInterface& Material, const uint64 Seed) \
 		{ \
-			const auto Value = Material.Getter(); \
+			const auto Value = ReadValue; \
 			return CityHash64WithSeed(reinterpret_cast<const char*>(&Value), sizeof(Value), Seed); \
 		}, \
-		[](const UMaterialInterface& Material) { return FormatBasePropertyValue(Material.Getter()); } \
+		[](const UMaterialInterface& Material) { return FormatBasePropertyValue(ReadValue); } \
 	}
 
-	/** The base properties UMaterialInstance::GetBasePropertyOverridesHash puts in a shader map ID, in the same order. */
+	/** The base properties UE 4.27's UMaterialInstance::GetBasePropertyOverridesHash puts in a shader map ID. */
 	static const FBasePropertyCheck BasePropertyChecks[] =
 	{
-		ASSET_ANALYTICS_BASE_PROPERTY("OpacityMaskClipValue", bOverride_OpacityMaskClipValue, GetOpacityMaskClipValue),
-		ASSET_ANALYTICS_BASE_PROPERTY("BlendMode", bOverride_BlendMode, GetBlendMode),
-		ASSET_ANALYTICS_BASE_PROPERTY("ShadingModel", bOverride_ShadingModel, GetShadingModels),
-		ASSET_ANALYTICS_BASE_PROPERTY("TwoSided", bOverride_TwoSided, IsTwoSided),
-		ASSET_ANALYTICS_BASE_PROPERTY("ThinSurface", bOverride_bIsThinSurface, IsThinSurface),
-		ASSET_ANALYTICS_BASE_PROPERTY("DitheredLODTransition", bOverride_DitheredLODTransition, IsDitheredLODTransition),
-		ASSET_ANALYTICS_BASE_PROPERTY("CastDynamicShadowAsMasked", bOverride_CastDynamicShadowAsMasked, GetCastDynamicShadowAsMasked),
-		ASSET_ANALYTICS_BASE_PROPERTY("OutputTranslucentVelocity", bOverride_OutputTranslucentVelocity, IsTranslucencyWritingVelocity),
-		ASSET_ANALYTICS_BASE_PROPERTY("HasPixelAnimation", bOverride_bHasPixelAnimation, HasPixelAnimation),
-		ASSET_ANALYTICS_BASE_PROPERTY("EnableTessellation", bOverride_bEnableTessellation, IsTessellationEnabled),
-		ASSET_ANALYTICS_BASE_PROPERTY("DisplacementScaling", bOverride_DisplacementScaling, GetDisplacementScaling),
-		ASSET_ANALYTICS_BASE_PROPERTY("EnableDisplacementFade", bOverride_bEnableDisplacementFade, IsDisplacementFadeEnabled),
-		ASSET_ANALYTICS_BASE_PROPERTY("DisplacementFadeRange", bOverride_DisplacementFadeRange, GetDisplacementFadeRange),
-		ASSET_ANALYTICS_BASE_PROPERTY("MaxWorldPositionOffsetDisplacement", bOverride_MaxWorldPositionOffsetDisplacement, GetMaxWorldPositionOffsetDisplacement),
-		ASSET_ANALYTICS_BASE_PROPERTY("CompatibleWithLumenCardSharing", bOverride_CompatibleWithLumenCardSharing, IsCompatibleWithLumenCardSharing),
+		ASSET_ANALYTICS_BASE_PROPERTY("OpacityMaskClipValue", bOverride_OpacityMaskClipValue, Material.GetOpacityMaskClipValue()),
+		ASSET_ANALYTICS_BASE_PROPERTY("BlendMode", bOverride_BlendMode, Material.GetBlendMode()),
+		ASSET_ANALYTICS_BASE_PROPERTY("ShadingModel", bOverride_ShadingModel, Material.GetShadingModels()),
+		ASSET_ANALYTICS_BASE_PROPERTY("TwoSided", bOverride_TwoSided, Material.IsTwoSided()),
+		ASSET_ANALYTICS_BASE_PROPERTY("DitheredLODTransition", bOverride_DitheredLODTransition, Material.IsDitheredLODTransition()),
+		ASSET_ANALYTICS_BASE_PROPERTY("CastDynamicShadowAsMasked", bOverride_CastDynamicShadowAsMasked, GetCastDynamicShadowAsMaskedValue(Material)),
 	};
 
 	/**
 	 * Hashes the base properties whose value in Instance differs from its master's, as the engine does when it builds
-	 * a shader map ID. UE 5.7 does not export UMaterialInstance::GetBasePropertyOverridesHash, so the plugin computes
+	 * a shader map ID. UE 4.27 does not export UMaterialInstance::GetBasePropertyOverridesHash, so the plugin computes
 	 * its own hash. It only needs equal overrides to give equal hashes; it does not match the engine's value.
 	 * Returns: 0 when no base property differs from the master.
 	 */
@@ -406,7 +416,10 @@ namespace Material
 	static int32 CountQualityShaderMaps(const UMaterialInterface& Material, const EShaderPlatform ShaderPlatform)
 	{
 		// Quality levels whose Quality Switch inputs differ, including switches inside material functions.
-		const TArray<bool>& SwitchQualityLevelsUsed = Material.GetCachedExpressionData().QualityLevelsUsed;
+		// UE 4.27 caches them on the master only; its instances use the master's, as the 4.27 cook does.
+		const UMaterial* BaseMaterial = Material.GetMaterial();
+		if (BaseMaterial == nullptr) return 1;
+		const TArray<bool>& SwitchQualityLevelsUsed = BaseMaterial->GetCachedExpressionData().QualityLevelsUsed;
 		const UShaderPlatformQualitySettings* QualitySettings =
 			UMaterialShaderQualitySettings::Get()->GetShaderPlatformQualitySettings(ShaderPlatform);
 
@@ -447,33 +460,88 @@ namespace Material
 		return ShaderMapCount;
 	}
 
-	/**
-	 * Counts the shaders Material's shader maps compile on ShaderPlatform, from the engine's shader map layout.
-	 * Nothing is compiled: the layout lists every shader type each vertex factory would cache, using the
-	 * material's own shader parameters (UE 5.7 has no conservative parameter set), so the count can differ slightly
-	 * from a cook. This is the count the material editor's
-	 * shader stats and the DumpMaterialShaderTypes commandlet use.
-	 * A master covers all its quality shader maps; an instance only covers its active quality level.
-	 * Inputs: CookedPlatform selects the cooked game's shader permutations (nullptr uses the editor's, which adds
-	 * editor-only shaders). Multiplier repeats the count, for instance quality shader maps the layout does not cover.
-	 * Returns: The shader count.
-	 */
-	static int32 CountLayoutShaders(
-		UMaterialInterface& Material,
-		const EShaderPlatform ShaderPlatform,
-		const ITargetPlatform* CookedPlatform,
-		const int32 Multiplier)
+	/** Returns whether every stage of PipelineType compiles for Parameters, so the pipeline is part of the shader map. */
+	static bool ShouldCompilePipeline(const FShaderPipelineType& PipelineType, const FShaderPermutationParameters& Parameters)
 	{
-		TArray<FDebugShaderTypeInfo> ShaderInfos;
-		Material.GetShaderTypes(ShaderPlatform, CookedPlatform, ShaderInfos);
+		for (const FShaderType* StageType : PipelineType.GetStages())
+		{
+			if (!StageType->ShouldCompilePermutation(Parameters)) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Counts the shaders Material's shader map compiles on ShaderPlatform, from its shader map layout. Nothing is
+	 * compiled. UE 4.27 keeps the layout code private (FMaterialShaderMapLayoutCache::CreateLayout in
+	 * MaterialShader.cpp), so this repeats it with the exported shader type APIs: every material shader type and
+	 * pipeline, then the mesh material shader types and pipelines of each vertex factory the material caches.
+	 * Like a cook, editor-only permutations are left out, and FMaterial::ShouldCache filters shader types as real
+	 * compiles do. The layout covers the material's active quality level only.
+	 * Inputs: Material needs a material resource for the editor's feature level, which the editor creates on load.
+	 * Multiplier repeats the count, for the quality shader maps the layout does not cover.
+	 * Returns: The shader count, or 0 when Material has no material resource.
+	 */
+	static int32 CountLayoutShaders(UMaterialInterface& Material, const EShaderPlatform ShaderPlatform, const int32 Multiplier)
+	{
+		const FMaterialResource* MaterialResource = Material.GetMaterialResource(GMaxRHIFeatureLevel);
+		if (MaterialResource == nullptr)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not count the shaders of %s because it has no material resource."), *Material.GetPathName());
+			return 0;
+		}
+
+		const FMaterialShaderParameters MaterialParameters(MaterialResource);
+		// Without the HasEditorOnlyData flag the layout matches a cooked game.
+		const EShaderPermutationFlags PermutationFlags = EShaderPermutationFlags::None;
+		const bool bHasTessellation = MaterialParameters.TessellationMode != MTM_NoTessellation;
+		const bool bSupportsPipelines = RHISupportsShaderPipelines(ShaderPlatform);
 
 		int32 ShaderCount = 0;
-		for (const FDebugShaderTypeInfo& ShaderInfo : ShaderInfos)
+		for (FShaderType* ShaderType : FShaderType::GetSortedTypes(FShaderType::EShaderTypeForDynamicCast::Material))
 		{
-			ShaderCount += ShaderInfo.ShaderTypes.Num();
-			for (const FDebugShaderPipelineInfo& PipelineInfo : ShaderInfo.Pipelines)
+			if (!MaterialResource->ShouldCache(ShaderPlatform, ShaderType, nullptr)) continue;
+			for (int32 PermutationId = 0; PermutationId < ShaderType->GetPermutationCount(); ++PermutationId)
 			{
-				ShaderCount += PipelineInfo.ShaderTypes.Num();
+				const FMaterialShaderPermutationParameters Parameters(ShaderPlatform, MaterialParameters, PermutationId, PermutationFlags);
+				if (ShaderType->ShouldCompilePermutation(Parameters)) ++ShaderCount;
+			}
+		}
+		if (bSupportsPipelines)
+		{
+			const FMaterialShaderPermutationParameters Parameters(ShaderPlatform, MaterialParameters, kUniqueShaderPermutationId, PermutationFlags);
+			for (const FShaderPipelineType* PipelineType : FShaderPipelineType::GetSortedTypes(FShaderType::EShaderTypeForDynamicCast::Material))
+			{
+				if (PipelineType->HasTessellation() == bHasTessellation && ShouldCompilePipeline(*PipelineType, Parameters))
+				{
+					ShaderCount += PipelineType->GetStages().Num();
+				}
+			}
+		}
+
+		for (FVertexFactoryType* VertexFactoryType : FVertexFactoryType::GetSortedMaterialTypes())
+		{
+			const FVertexFactoryShaderPermutationParameters VertexFactoryParameters(ShaderPlatform, MaterialParameters, VertexFactoryType, PermutationFlags);
+			if (!VertexFactoryType->ShouldCache(VertexFactoryParameters)) continue;
+
+			for (FShaderType* ShaderType : FShaderType::GetSortedTypes(FShaderType::EShaderTypeForDynamicCast::MeshMaterial))
+			{
+				if (!MaterialResource->ShouldCache(ShaderPlatform, ShaderType, VertexFactoryType)) continue;
+				for (int32 PermutationId = 0; PermutationId < ShaderType->GetPermutationCount(); ++PermutationId)
+				{
+					const FMeshMaterialShaderPermutationParameters Parameters(ShaderPlatform, MaterialParameters, VertexFactoryType, PermutationId, PermutationFlags);
+					if (ShaderType->ShouldCompilePermutation(Parameters)) ++ShaderCount;
+				}
+			}
+			if (bSupportsPipelines)
+			{
+				const FMeshMaterialShaderPermutationParameters Parameters(ShaderPlatform, MaterialParameters, VertexFactoryType, kUniqueShaderPermutationId, PermutationFlags);
+				for (const FShaderPipelineType* PipelineType : FShaderPipelineType::GetSortedTypes(FShaderType::EShaderTypeForDynamicCast::MeshMaterial))
+				{
+					if (PipelineType->HasTessellation() == bHasTessellation && ShouldCompilePipeline(*PipelineType, Parameters))
+					{
+						ShaderCount += PipelineType->GetStages().Num();
+					}
+				}
 			}
 		}
 		return ShaderCount * Multiplier;
@@ -486,25 +554,23 @@ namespace Material
 	 */
 	static EMaterialUserType ClassifyPlacedActor(IAssetRegistry& AssetRegistry, const FAssetData& ActorAsset)
 	{
-		// Plugin classes are compared by path, so their modules are not needed as dependencies.
-		static const FTopLevelAssetPath ISMPartitionActorClass(TEXT("/Script/Engine"), TEXT("ISMPartitionActor"));
-		static const FTopLevelAssetPath WaterBodyClass(TEXT("/Script/Water"), TEXT("WaterBody"));
-		static const FTopLevelAssetPath WaterZoneClass(TEXT("/Script/Water"), TEXT("WaterZone"));
-		static const FTopLevelAssetPath VolumetricCloudClass(TEXT("/Script/Engine"), TEXT("VolumetricCloud"));
-		static const FTopLevelAssetPath HeterogeneousVolumeClass(TEXT("/Script/Engine"), TEXT("HeterogeneousVolume"));
-		static const FTopLevelAssetPath VirtualHeightfieldMeshClass(TEXT("/Script/VirtualHeightfieldMesh"), TEXT("VirtualHeightfieldMesh"));
+		// UE 4.27 registry entries only hold short class names. Plugin classes are compared by name, so their
+		// modules are not needed as dependencies.
+		static const FName InstancedFoliageActorClass(TEXT("InstancedFoliageActor"));
+		static const FName WaterBodyClass(TEXT("WaterBody"));
+		static const FName VolumetricCloudClass(TEXT("VolumetricCloud"));
+		static const FName VirtualHeightfieldMeshClass(TEXT("VirtualHeightfieldMesh"));
 
-		// Check the actor class and its parents, so subclasses such as WaterBodyRiver or InstancedFoliageActor match too.
-		TArray<FTopLevelAssetPath> ActorClassAndAncestors;
-		AssetRegistry.GetAncestorClassNames(ActorAsset.AssetClassPath, ActorClassAndAncestors);
-		ActorClassAndAncestors.Add(ActorAsset.AssetClassPath);
-		for (const FTopLevelAssetPath& ClassPath : ActorClassAndAncestors)
+		// Check the actor class and its parents, so subclasses such as WaterBodyRiver match too.
+		TArray<FName> ActorClassAndAncestors;
+		AssetRegistry.GetAncestorClassNames(ActorAsset.AssetClass, ActorClassAndAncestors);
+		ActorClassAndAncestors.Add(ActorAsset.AssetClass);
+		for (const FName ClassName : ActorClassAndAncestors)
 		{
-			if (ClassPath == ISMPartitionActorClass) return EMaterialUserType::InstancedStaticMeshes;
-			if (ClassPath == WaterBodyClass || ClassPath == WaterZoneClass) return EMaterialUserType::Water;
-			if (ClassPath == VolumetricCloudClass) return EMaterialUserType::VolumetricCloud;
-			if (ClassPath == HeterogeneousVolumeClass) return EMaterialUserType::HeterogeneousVolumes;
-			if (ClassPath == VirtualHeightfieldMeshClass) return EMaterialUserType::VirtualHeightfieldMesh;
+			if (ClassName == InstancedFoliageActorClass) return EMaterialUserType::InstancedStaticMeshes;
+			if (ClassName == WaterBodyClass) return EMaterialUserType::Water;
+			if (ClassName == VolumetricCloudClass) return EMaterialUserType::VolumetricCloud;
+			if (ClassName == VirtualHeightfieldMeshClass) return EMaterialUserType::VirtualHeightfieldMesh;
 		}
 		return EMaterialUserType::Level;
 	}
@@ -521,8 +587,9 @@ namespace Material
 		const TArray<FAssetData>& PackageAssets)
 	{
 		// World Partition stores each placed actor in its own package under __ExternalActors__.
+		// UE 4.27 has no FPackagePath, so the folder name is written out.
 		const FString PackageName = ReferencerPackage.ToString();
-		if (PackageName.Contains(FPackagePath::GetExternalActorsFolderName()))
+		if (PackageName.Contains(TEXT("/__ExternalActors__/")))
 		{
 			return PackageAssets.Num() > 0
 				? ClassifyPlacedActor(AssetRegistry, PackageAssets[0])
@@ -530,34 +597,29 @@ namespace Material
 		}
 		if (PackageAssets.Num() == 0) return EMaterialUserType::Other;
 
-		// Plugin classes are compared by path, so their modules are not needed as dependencies.
-		static const FTopLevelAssetPath StaticMeshClass(TEXT("/Script/Engine"), TEXT("StaticMesh"));
-		static const FTopLevelAssetPath SkeletalMeshClass(TEXT("/Script/Engine"), TEXT("SkeletalMesh"));
-		static const FTopLevelAssetPath NiagaraSystemClass(TEXT("/Script/Niagara"), TEXT("NiagaraSystem"));
-		static const FTopLevelAssetPath ParticleSystemClass(TEXT("/Script/Engine"), TEXT("ParticleSystem"));
-		static const FTopLevelAssetPath GeometryCollectionClass(TEXT("/Script/GeometryCollectionEngine"), TEXT("GeometryCollection"));
-		static const FTopLevelAssetPath GeometryCacheClass(TEXT("/Script/GeometryCache"), TEXT("GeometryCache"));
-		static const FTopLevelAssetPath GroomClass(TEXT("/Script/HairStrandsCore"), TEXT("GroomAsset"));
-		static const FTopLevelAssetPath LidarPointCloudClass(TEXT("/Script/LidarPointCloudRuntime"), TEXT("LidarPointCloud"));
-		static const FTopLevelAssetPath WorldClass(TEXT("/Script/Engine"), TEXT("World"));
+		// UE 4.27 registry entries only hold short class names. Plugin classes are compared by name, so their
+		// modules are not needed as dependencies.
+		static const FName StaticMeshClass(TEXT("StaticMesh"));
+		static const FName SkeletalMeshClass(TEXT("SkeletalMesh"));
+		static const FName NiagaraSystemClass(TEXT("NiagaraSystem"));
+		static const FName ParticleSystemClass(TEXT("ParticleSystem"));
+		static const FName GeometryCollectionClass(TEXT("GeometryCollection"));
+		static const FName GeometryCacheClass(TEXT("GeometryCache"));
+		static const FName GroomClass(TEXT("GroomAsset"));
+		static const FName LidarPointCloudClass(TEXT("LidarPointCloud"));
+		static const FName WorldClass(TEXT("World"));
 
 		const FAssetData& ReferencerAsset = PackageAssets[0];
-		const FTopLevelAssetPath& ClassPath = ReferencerAsset.AssetClassPath;
-		if (ClassPath == StaticMeshClass)
-		{
-			// The NaniteEnabled tag is saved with every static mesh, so Nanite meshes are told apart without loading.
-			bool bNaniteEnabled = false;
-			ReferencerAsset.GetTagValue(TEXT("NaniteEnabled"), bNaniteEnabled);
-			return bNaniteEnabled ? EMaterialUserType::Nanite : EMaterialUserType::StaticMesh;
-		}
-		if (ClassPath == SkeletalMeshClass) return EMaterialUserType::SkeletalMesh;
-		if (ClassPath == NiagaraSystemClass) return EMaterialUserType::Niagara;
-		if (ClassPath == ParticleSystemClass) return EMaterialUserType::Particle;
-		if (ClassPath == GeometryCollectionClass) return EMaterialUserType::GeometryCollections;
-		if (ClassPath == GeometryCacheClass) return EMaterialUserType::GeometryCache;
-		if (ClassPath == GroomClass) return EMaterialUserType::HairStrands;
-		if (ClassPath == LidarPointCloudClass) return EMaterialUserType::LidarPointCloud;
-		if (ClassPath == WorldClass) return EMaterialUserType::Level;
+		const FName ClassName = ReferencerAsset.AssetClass;
+		if (ClassName == StaticMeshClass) return EMaterialUserType::StaticMesh;
+		if (ClassName == SkeletalMeshClass) return EMaterialUserType::SkeletalMesh;
+		if (ClassName == NiagaraSystemClass) return EMaterialUserType::Niagara;
+		if (ClassName == ParticleSystemClass) return EMaterialUserType::Particle;
+		if (ClassName == GeometryCollectionClass) return EMaterialUserType::GeometryCollections;
+		if (ClassName == GeometryCacheClass) return EMaterialUserType::GeometryCache;
+		if (ClassName == GroomClass) return EMaterialUserType::HairStrands;
+		if (ClassName == LidarPointCloudClass) return EMaterialUserType::LidarPointCloud;
+		if (ClassName == WorldClass) return EMaterialUserType::Level;
 
 		// GetClass only finds classes that are already loaded, so no asset is loaded here.
 		const UClass* AssetClass = ReferencerAsset.GetClass();
@@ -572,12 +634,14 @@ namespace Material
 	static FMaterialUser MakeMaterialUser(IAssetRegistry& AssetRegistry, const FName ReferencerPackage)
 	{
 		TArray<FAssetData> PackageAssets;
-		AssetRegistry.GetAssetsByPackageName(ReferencerPackage, PackageAssets);
+		// On-disk data only: UE 4.27 finds in-memory assets by iterating every loaded object, which takes seconds
+		// per call in a large project and is repeated for every referencing package.
+		AssetRegistry.GetAssetsByPackageName(ReferencerPackage, PackageAssets, /*bIncludeOnlyOnDiskAssets*/ true);
 
 		FMaterialUser User;
 		User.Type = ClassifyReferencer(AssetRegistry, ReferencerPackage, PackageAssets);
 		User.Path = PackageAssets.Num() > 0
-			? PackageAssets[0].GetObjectPathString()
+			? PackageAssets[0].ObjectPath.ToString()
 			: ReferencerPackage.ToString();
 		return User;
 	}
@@ -593,21 +657,26 @@ namespace Material
 	/** One way a loaded user draws materials: the usage flag it needs and the materials it draws that way. */
 	struct FMaterialUse
 	{
-		/** Usage flag needed, or MATUSAGE_MAX when the component or emitter type is not recognised. */
+		/** Usage flag needed, or MATUSAGE_MAX when none is needed or the component or emitter type is not recognised. */
 		EMaterialUsage Usage = MATUSAGE_MAX;
 
 		/** Materials drawn this way. Empty means the use applies to every material of the user. */
 		TArray<FSoftObjectPath> Materials;
+
+		/** Whether the report recognises the component or emitter type, so Usage is known. */
+		bool bRecognised = true;
 	};
 
-	/** Adds a use of Usage for the valid entries of Materials to Uses. */
+	/** Adds a use of Usage for the valid entries of Materials to Uses. bRecognised is false for unknown component types. */
 	static void AddMaterialUse(
 		TArray<FMaterialUse>& Uses,
 		const EMaterialUsage Usage,
-		const TArray<UMaterialInterface*>& Materials)
+		const TArray<UMaterialInterface*>& Materials,
+		const bool bRecognised = true)
 	{
 		FMaterialUse& Use = Uses.AddDefaulted_GetRef();
 		Use.Usage = Usage;
+		Use.bRecognised = bRecognised;
 		for (const UMaterialInterface* Material : Materials)
 		{
 			if (Material != nullptr) Use.Materials.AddUnique(FSoftObjectPath(Material));
@@ -615,29 +684,32 @@ namespace Material
 	}
 
 	/**
-	 * Returns the usage flag a component needs for the materials it draws.
-	 * Returns: MATUSAGE_MAX for component types this report does not recognize.
+	 * Finds the usage flag a component needs for the materials it draws.
+	 * Output: OutUsage is that flag, or MATUSAGE_MAX when the component needs none: UE 4.27 has no static mesh
+	 * usage flag, so a plain static mesh component needs none.
+	 * Returns: False for component types this report does not recognise.
 	 */
-	static EMaterialUsage GetComponentUsage(const UPrimitiveComponent& Component)
+	static bool TryGetComponentUsage(const UPrimitiveComponent& Component, EMaterialUsage& OutUsage)
 	{
+		OutUsage = MATUSAGE_MAX;
 		// Subclasses are checked before UStaticMeshComponent because they derive from it.
-		if (Component.IsA<USplineMeshComponent>()) return MATUSAGE_SplineMesh;
-		if (Component.IsA<UInstancedStaticMeshComponent>()) return MATUSAGE_InstancedStaticMeshes;
-		if (const UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(&Component))
-		{
-			const UStaticMesh* StaticMesh = StaticMeshComponent->GetStaticMesh();
-			return StaticMesh != nullptr && StaticMesh->IsNaniteEnabled() ? MATUSAGE_Nanite : MATUSAGE_StaticMesh;
-		}
-		if (Component.IsA<USkeletalMeshComponent>()) return MATUSAGE_SkeletalMesh;
+		if (Component.IsA<USplineMeshComponent>()) OutUsage = MATUSAGE_SplineMesh;
+		else if (Component.IsA<UInstancedStaticMeshComponent>()) OutUsage = MATUSAGE_InstancedStaticMeshes;
+		else if (Component.IsA<UStaticMeshComponent>()) return true;
+		else if (Component.IsA<USkeletalMeshComponent>()) OutUsage = MATUSAGE_SkeletalMesh;
+		if (OutUsage != MATUSAGE_MAX) return true;
 
-		// Compared by path, so the GeometryCollectionEngine module is not needed as a dependency.
-		static const FTopLevelAssetPath GeometryCollectionComponentClass(
-			TEXT("/Script/GeometryCollectionEngine"), TEXT("GeometryCollectionComponent"));
+		// Compared by name, so the GeometryCollectionEngine module is not needed as a dependency.
+		static const FName GeometryCollectionComponentClass(TEXT("GeometryCollectionComponent"));
 		for (const UClass* Class = Component.GetClass(); Class != nullptr; Class = Class->GetSuperClass())
 		{
-			if (Class->GetClassPathName() == GeometryCollectionComponentClass) return MATUSAGE_GeometryCollections;
+			if (Class->GetFName() == GeometryCollectionComponentClass)
+			{
+				OutUsage = MATUSAGE_GeometryCollections;
+				return true;
+			}
 		}
-		return MATUSAGE_MAX;
+		return false;
 	}
 
 	/**
@@ -678,7 +750,9 @@ namespace Material
 
 			TArray<UMaterialInterface*> UsedMaterials;
 			PrimitiveComponent->GetUsedMaterials(UsedMaterials);
-			AddMaterialUse(Uses, GetComponentUsage(*PrimitiveComponent), UsedMaterials);
+			EMaterialUsage Usage = MATUSAGE_MAX;
+			const bool bRecognised = TryGetComponentUsage(*PrimitiveComponent, Usage);
+			AddMaterialUse(Uses, Usage, UsedMaterials, bRecognised);
 		}
 		return Uses;
 	}
@@ -755,9 +829,8 @@ namespace Material
 	 */
 	static bool TryFindPackageObjectOfClass(const FName PackageName, const FName ClassName, bool& bOutFound)
 	{
-		FPackagePath PackagePath;
-		if (!FPackagePath::TryFromPackageName(PackageName, PackagePath)) return false;
-		FLinkerLoad* Linker = GetPackageLinker(nullptr, PackagePath, LOAD_NoVerify | LOAD_Quiet | LOAD_NoWarn, nullptr);
+		if (!FPackageName::DoesPackageExist(PackageName.ToString())) return false;
+		FLinkerLoad* Linker = GetPackageLinker(nullptr, *PackageName.ToString(), LOAD_NoVerify | LOAD_Quiet | LOAD_NoWarn, nullptr, nullptr);
 		if (Linker == nullptr) return false;
 
 		bOutFound = Linker->ExportMap.ContainsByPredicate([Linker, ClassName](const FObjectExport& Export)
@@ -779,8 +852,8 @@ namespace Material
 	 */
 	static bool TryFindUnloadedSkeletalMeshUses(IAssetRegistry& AssetRegistry, const FSoftObjectPath& UserPath, TArray<FMaterialUse>& OutUses)
 	{
-		const FAssetData UserData = AssetRegistry.GetAssetByObjectPath(UserPath);
-		if (!UserData.IsValid() || UserData.AssetClassPath != USkeletalMesh::StaticClass()->GetClassPathName()) return false;
+		const FAssetData UserData = AssetRegistry.GetAssetByObjectPath(FName(*UserPath.ToString()));
+		if (!UserData.IsValid() || UserData.AssetClass != USkeletalMesh::StaticClass()->GetFName()) return false;
 		// Packages saved before the tag existed, or already in memory, are left to the loading path.
 		int32 MorphTargetCount = 0;
 		if (!UserData.GetTagValue(TEXT("MorphTargets"), MorphTargetCount)) return false;
@@ -794,7 +867,8 @@ namespace Material
 				bHasObjects = true;
 				return false;
 			}, false);
-			if (bHasObjects || ExistingPackage->GetLinker() != nullptr) return false;
+			// UE 4.27's UPackage has no GetLinker; the open header is found through FLinkerLoad instead.
+			if (bHasObjects || FLinkerLoad::FindExistingLinkerForPackage(ExistingPackage) != nullptr) return false;
 		}
 
 		bool bHasClothing = false;
@@ -824,7 +898,7 @@ namespace Material
 			// Work is split into small steps run on separate ticks, so the editor repaints the notification in between.
 			Step = ERunnerStep::ShowNotification;
 			StepStartSeconds = FPlatformTime::Seconds();
-			TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+			TickerHandle = FTicker::GetCoreTicker().AddTicker(
 				FTickerDelegate::CreateRaw(this, &FMaterialAnalyticsRunner::Tick));
 		}
 
@@ -849,6 +923,10 @@ namespace Material
 			BuildInstanceTree,
 			/** Fills report rows within a per-tick time budget. */
 			ProcessMaterials,
+			/** Loads the current master's users for Vertex Factory Users within a per-tick time budget. */
+			ResolveUsers,
+			/** Reads the current master's instances for Shader Permutations within a per-tick time budget. */
+			ReadPermutations,
 			/** Unloads the packages loaded by the finished batch. */
 			UnloadPackages
 		};
@@ -876,6 +954,8 @@ namespace Material
 			InstancePackages.Reset();
 			UserByPackage.Reset();
 			UsesByUserPath.Reset();
+			UserResolve = FUserResolveState();
+			PermutationRead = FPermutationReadState();
 			NextAssetIndex = 0;
 			MaterialsInBatch = 0;
 			BatchLoadedAssetCount = 0;
@@ -894,7 +974,7 @@ namespace Material
 		{
 			if (TickerHandle.IsValid())
 			{
-				FTSTicker::RemoveTicker(TickerHandle);
+				FTicker::GetCoreTicker().RemoveTicker(TickerHandle);
 				TickerHandle.Reset();
 			}
 			TrackUnfinishedBatch();
@@ -920,7 +1000,7 @@ namespace Material
 		{
 			TArray<FAssetData> MaterialInstances;
 			AssetRegistry.GetAssetsByClass(
-				UMaterialInstanceConstant::StaticClass()->GetClassPathName(),
+				UMaterialInstanceConstant::StaticClass()->GetFName(),
 				MaterialInstances,
 				true);
 			for (const FAssetData& MaterialInstance : MaterialInstances)
@@ -949,7 +1029,7 @@ namespace Material
 			TArray<FAssetData> CountedInstances;
 			while (PathsToVisit.Num() > 0)
 			{
-				const FSoftObjectPath CurrentPath = PathsToVisit.Pop(EAllowShrinking::No);
+				const FSoftObjectPath CurrentPath = PathsToVisit.Pop(/*bAllowShrinking*/ false);
 				const TArray<FAssetData>* ChildInstances = ChildInstancesByParent.Find(CurrentPath);
 				if (ChildInstances == nullptr) continue;
 
@@ -957,13 +1037,13 @@ namespace Material
 				{
 					// The visited check guards against broken data that loops back on itself.
 					bool bAlreadyVisited = false;
-					VisitedInstances.Add(ChildInstance.GetSoftObjectPath(), &bAlreadyVisited);
+					VisitedInstances.Add(ChildInstance.ToSoftObjectPath(), &bAlreadyVisited);
 					if (bAlreadyVisited) continue;
 					if (Settings.bIgnoreUnreferencedAssets &&
 						!Core::HasRelevantReferencer(AssetRegistry, ChildInstance, Settings.bIgnoreDeveloperReferences)) continue;
 
 					CountedInstances.Add(ChildInstance);
-					PathsToVisit.Add(ChildInstance.GetSoftObjectPath());
+					PathsToVisit.Add(ChildInstance.ToSoftObjectPath());
 				}
 			}
 			return CountedInstances;
@@ -1018,7 +1098,7 @@ namespace Material
 			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
 			FARFilter Filter;
 			// Subclasses are left out so material instances are not reported as masters.
-			Filter.ClassPaths.Add(UMaterial::StaticClass()->GetClassPathName());
+			Filter.ClassNames.Add(UMaterial::StaticClass()->GetFName());
 			Filter.bRecursivePaths = true;
 			for (const FDirectoryPath& Directory : Settings->MaterialSearchFolders)
 			{
@@ -1062,22 +1142,54 @@ namespace Material
 		}
 
 		/**
-		 * Builds the shader map key of Material: its effective static parameters with every bOverride cleared, as
+		 * Builds the shader map key of Instance: its effective static parameters with every bOverride cleared, as
 		 * FMaterialShaderMapId::UpdateFromParameterSet does, so an inherited value and an overridden equal value match.
 		 */
-		static FStaticPermutationKey MakePermutationKey(UMaterialInterface& Material, const uint64 BasePropertyOverridesHash)
+		static FStaticPermutationKey MakePermutationKey(UMaterialInstance& Instance, const uint64 BasePropertyOverridesHash)
 		{
 			FStaticPermutationKey Key;
-			Material.GetStaticParameterValues(Key.StaticParameters);
+			Instance.GetStaticParameterValues(Key.StaticParameters);
 			for (FStaticSwitchParameter& SwitchParameter : Key.StaticParameters.StaticSwitchParameters)
 			{
 				SwitchParameter.bOverride = false;
 			}
-			for (FStaticComponentMaskParameter& MaskParameter : Key.StaticParameters.EditorOnly.StaticComponentMaskParameters)
+			for (FStaticComponentMaskParameter& MaskParameter : Key.StaticParameters.StaticComponentMaskParameters)
 			{
 				MaskParameter.bOverride = false;
 			}
 			Key.BasePropertyOverridesHash = BasePropertyOverridesHash;
+			return Key;
+		}
+
+		/**
+		 * Builds the shader map key of a master material: its static switches and component masks at their default
+		 * values, with bOverride cleared. UE 4.27's UMaterial has no GetStaticParameterValues, so they are read one by
+		 * one. The master's base properties are its own, so its base property hash is 0, as for instances that change none.
+		 */
+		static FStaticPermutationKey MakeMasterPermutationKey(const UMaterial& Material)
+		{
+			FStaticPermutationKey Key;
+			TArray<FMaterialParameterInfo> ParameterInfos;
+			TArray<FGuid> ParameterGuids;
+			Material.GetAllStaticSwitchParameterInfo(ParameterInfos, ParameterGuids);
+			for (const FMaterialParameterInfo& SwitchInfo : ParameterInfos)
+			{
+				bool bValue = false;
+				FGuid ExpressionGuid;
+				Material.GetStaticSwitchParameterDefaultValue(FHashedMaterialParameterInfo(SwitchInfo), bValue, ExpressionGuid);
+				Key.StaticParameters.StaticSwitchParameters.Emplace(SwitchInfo, bValue, false, ExpressionGuid);
+			}
+
+			ParameterInfos.Reset();
+			ParameterGuids.Reset();
+			Material.GetAllStaticComponentMaskParameterInfo(ParameterInfos, ParameterGuids);
+			for (const FMaterialParameterInfo& MaskInfo : ParameterInfos)
+			{
+				bool bR = false, bG = false, bB = false, bA = false;
+				FGuid ExpressionGuid;
+				Material.GetStaticComponentMaskParameterDefaultValue(FHashedMaterialParameterInfo(MaskInfo), bR, bG, bB, bA, ExpressionGuid);
+				Key.StaticParameters.StaticComponentMaskParameters.Emplace(MaskInfo, bR, bG, bB, bA, false, ExpressionGuid);
+			}
 			return Key;
 		}
 
@@ -1096,7 +1208,7 @@ namespace Material
 		{
 			TArray<FMaterialParameterInfo> ParameterInfos;
 			TArray<FGuid> ParameterGuids;
-			MasterMaterial.GetAllParameterInfoOfType(EMaterialParameterType::StaticSwitch, ParameterInfos, ParameterGuids);
+			MasterMaterial.GetAllStaticSwitchParameterInfo(ParameterInfos, ParameterGuids);
 			for (const FMaterialParameterInfo& SwitchInfo : ParameterInfos)
 			{
 				FPermutationParameterSummary& Summary = Item.PermutationParameters.AddDefaulted_GetRef();
@@ -1110,7 +1222,7 @@ namespace Material
 
 			ParameterInfos.Reset();
 			ParameterGuids.Reset();
-			MasterMaterial.GetAllParameterInfoOfType(EMaterialParameterType::StaticComponentMask, ParameterInfos, ParameterGuids);
+			MasterMaterial.GetAllStaticComponentMaskParameterInfo(ParameterInfos, ParameterGuids);
 			for (const FMaterialParameterInfo& MaskInfo : ParameterInfos)
 			{
 				FPermutationParameterSummary& Summary = Item.PermutationParameters.AddDefaulted_GetRef();
@@ -1179,25 +1291,27 @@ namespace Material
 				{
 					return OwnParameter.bOverride && OwnParameter.ParameterInfo == SwitchParameter.ParameterInfo;
 				});
-				FMaterialParameterMetadata ParentValue;
+				bool bParentValue = false;
+				FGuid ParentExpressionGuid;
 				const bool bSameAsParent =
-					Parent.GetParameterValue(EMaterialParameterType::StaticSwitch, SwitchParameter.ParameterInfo, ParentValue) &&
-					ParentValue.Value.AsStaticSwitch() == SwitchParameter.Value;
+					Parent.GetStaticSwitchParameterValue(FHashedMaterialParameterInfo(SwitchParameter.ParameterInfo), bParentValue, ParentExpressionGuid) &&
+					bParentValue == SwitchParameter.Value;
 				const bool bDiffersFromMaster = ParameterIndex != INDEX_NONE && Item.PermutationParameters[ParameterIndex].DefaultValue != ValueText;
 				AddCell(ParameterIndex, ValueText, bOwnOverride, bDiffersFromMaster, bSameAsParent);
 			}
-			for (const FStaticComponentMaskParameter& MaskParameter : InstanceKey.StaticParameters.EditorOnly.StaticComponentMaskParameters)
+			for (const FStaticComponentMaskParameter& MaskParameter : InstanceKey.StaticParameters.StaticComponentMaskParameters)
 			{
 				const int32 ParameterIndex = FindParameterIndex(EPermutationParameterKind::ComponentMask, MaskParameter.ParameterInfo);
 				const FString MaskText = FormatComponentMask(MaskParameter.R, MaskParameter.G, MaskParameter.B, MaskParameter.A);
-				const bool bOwnOverride = OwnStaticParameters.EditorOnly.StaticComponentMaskParameters.ContainsByPredicate([&MaskParameter](const FStaticComponentMaskParameter& OwnParameter)
+				const bool bOwnOverride = OwnStaticParameters.StaticComponentMaskParameters.ContainsByPredicate([&MaskParameter](const FStaticComponentMaskParameter& OwnParameter)
 				{
 					return OwnParameter.bOverride && OwnParameter.ParameterInfo == MaskParameter.ParameterInfo;
 				});
-				FMaterialParameterMetadata ParentValue;
+				bool bParentR = false, bParentG = false, bParentB = false, bParentA = false;
+				FGuid ParentExpressionGuid;
 				const bool bSameAsParent =
-					Parent.GetParameterValue(EMaterialParameterType::StaticComponentMask, MaskParameter.ParameterInfo, ParentValue) &&
-					FormatComponentMask(ParentValue.Value.Bool[0], ParentValue.Value.Bool[1], ParentValue.Value.Bool[2], ParentValue.Value.Bool[3]) == MaskText;
+					Parent.GetStaticComponentMaskParameterValue(FHashedMaterialParameterInfo(MaskParameter.ParameterInfo), bParentR, bParentG, bParentB, bParentA, ParentExpressionGuid) &&
+					FormatComponentMask(bParentR, bParentG, bParentB, bParentA) == MaskText;
 				const bool bDiffersFromMaster = ParameterIndex != INDEX_NONE && Item.PermutationParameters[ParameterIndex].DefaultValue != MaskText;
 				AddCell(ParameterIndex, MaskText, bOwnOverride, bDiffersFromMaster, bSameAsParent);
 			}
@@ -1216,82 +1330,111 @@ namespace Material
 		}
 
 		/**
-		 * Loads a master and its counted instances to read their static permutations on the editor's shader platform.
-		 * Instances that override static parameters or base properties compile their own shader map. Instances whose
-		 * shader map key matches the master's or another instance's compile the same shaders, so the layout shader
-		 * count is taken once per unique permutation, repeated for each of that instance's quality shader maps.
-		 * Output: Fills Item.PermutationParameters, InstancePermutationRows, StaticPermutationInstancePaths and
-		 * LayoutShaderCount, and sets Item.bShaderPermutationsRead.
+		 * Progress of reading one master's static permutations. Its instances are read over several ticks, because
+		 * loading an instance whose shaders are not cached starts compiling them, which can take seconds each.
+		 */
+		struct FPermutationReadState
+		{
+			/** Index in AssetItems of the master being read, or INDEX_NONE when no master is being read. */
+			int32 ItemIndex = INDEX_NONE;
+			/** The loaded master. */
+			TWeakObjectPtr<UMaterial> MasterMaterial;
+			/** Shader platform the layout shader counts are for. */
+			EShaderPlatform ShaderPlatform = SP_NumPlatforms;
+			/** Shader map key of the master. */
+			FStaticPermutationKey MasterKey;
+			/** Keys of the instances counted so far that compile their own, unique shader map. */
+			TArray<FStaticPermutationKey> PermutationKeys;
+			/** Index in the master's Instances of the next instance to read. */
+			int32 NextInstanceIndex = 0;
+			/** Layout shaders counted so far for the master and its unique permutations. */
+			int32 LayoutShaderCount = 0;
+		};
+
+		/**
+		 * Loads the master of Item to start reading its static permutations on the editor's shader platform: counts
+		 * the master's layout shaders for each of its quality shader maps, and lists its static parameters and base
+		 * properties.
+		 * Output: On success, OutState is ready for ReadInstancePermutation with ItemIndex as the master's report row.
+		 * OutState.ItemIndex stays INDEX_NONE when the master cannot be loaded.
 		 * Returns: The number of materials loaded from disk.
 		 */
-		static int32 ReadStaticPermutations(const FAssetData& MasterData, FMaterialAssetData& Item)
+		static int32 BeginStaticPermutations(const FAssetData& MasterData, FMaterialAssetData& Item, const int32 ItemIndex, FPermutationReadState& OutState)
 		{
-			int32 LoadedAssetCount = 0;
+			OutState = FPermutationReadState();
 			const bool bWasMasterLoaded = MasterData.IsAssetLoaded();
 			UMaterial* MasterMaterial = Cast<UMaterial>(MasterData.GetAsset());
 			if (MasterMaterial == nullptr)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material %s to read its static permutations."), *MasterData.GetObjectPathString());
-				return LoadedAssetCount;
+				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material %s to read its static permutations."), *MasterData.ObjectPath.ToString());
+				return 0;
 			}
-			if (!bWasMasterLoaded) ++LoadedAssetCount;
 
-			const EShaderPlatform ShaderPlatform = GMaxRHIShaderPlatform;
-			// The cooked game for the editor's own OS, such as Windows, so editor-only shaders are left out of the layout.
-			const ITargetPlatform* CookedPlatform = GetTargetPlatformManagerRef().FindTargetPlatform(FPlatformProperties::IniPlatformName());
-			int32 LayoutShaderCount = CountLayoutShaders(*MasterMaterial, ShaderPlatform, CookedPlatform, 1);
-
+			OutState.ItemIndex = ItemIndex;
+			OutState.MasterMaterial = MasterMaterial;
+			OutState.ShaderPlatform = GMaxRHIShaderPlatform;
+			OutState.LayoutShaderCount = CountLayoutShaders(*MasterMaterial, OutState.ShaderPlatform, CountQualityShaderMaps(*MasterMaterial, OutState.ShaderPlatform));
 			AddPermutationParameters(*MasterMaterial, Item);
+			OutState.MasterKey = MakeMasterPermutationKey(*MasterMaterial);
+			return bWasMasterLoaded ? 0 : 1;
+		}
 
-			// The master's base properties are its own, so its base property hash is 0, as for instances that change none.
-			const FStaticPermutationKey MasterKey = MakePermutationKey(*MasterMaterial, 0);
-			TArray<FStaticPermutationKey> PermutationKeys;
-			for (const FAssetData& InstanceData : Item.Instances)
+		/**
+		 * Loads one counted instance and reads its static permutation. An instance that overrides static parameters
+		 * or base properties compiles its own shader map; when its shader map key matches the master's or an earlier
+		 * instance's, it shares that shader map, so layout shaders are only counted once per unique permutation,
+		 * repeated for each of the instance's quality shader maps.
+		 * Output: Adds the instance's row and, for a static permutation instance, its path and layout shaders.
+		 * Returns: 1 when this call loaded the instance from disk, otherwise 0.
+		 */
+		static int32 ReadInstancePermutation(const UMaterial& MasterMaterial, const FAssetData& InstanceData, FMaterialAssetData& Item, FPermutationReadState& State)
+		{
+			const bool bWasAssetLoaded = InstanceData.IsAssetLoaded();
+			UMaterialInstance* Instance = Cast<UMaterialInstance>(InstanceData.GetAsset());
+			if (Instance == nullptr)
 			{
-				const bool bWasAssetLoaded = InstanceData.IsAssetLoaded();
-				UMaterialInstance* Instance = Cast<UMaterialInstance>(InstanceData.GetAsset());
-				if (Instance == nullptr)
-				{
-					UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material instance %s to read its static permutation."), *InstanceData.GetObjectPathString());
-					continue;
-				}
-				if (!bWasAssetLoaded) ++LoadedAssetCount;
-
-				FStaticPermutationKey Key = MakePermutationKey(*Instance, GetBasePropertyOverridesHash(*Instance));
-				FInstancePermutationRow& Row = Item.InstancePermutationRows.AddDefaulted_GetRef();
-				Row.Path = InstanceData.GetObjectPathString();
-				if (Instance->Parent != nullptr) ReadInstancePermutationCells(*MasterMaterial, *Instance, Key, Item, Row);
-
-				if (!Instance->bHasStaticPermutationResource) continue;
-
-				Item.StaticPermutationInstancePaths.Add(InstanceData.GetObjectPathString());
-				// Instances whose key matches the master's or an earlier instance's share that shader map.
-				const bool bAlreadySeen = MasterKey.CompilesSameShaders(Key) ||
-					PermutationKeys.ContainsByPredicate([&Key](const FStaticPermutationKey& SeenKey)
-					{
-						return SeenKey.CompilesSameShaders(Key);
-					});
-				if (bAlreadySeen) continue;
-
-				PermutationKeys.Add(MoveTemp(Key));
-				// The layout only covers the instance's active quality level, so it is repeated for each quality shader map.
-				// GetShaderTypes asserts that static permutation instances are constant instances.
-				if (Instance->IsA<UMaterialInstanceConstant>())
-				{
-					const int32 InstanceShaderMapCount = CountQualityShaderMaps(*Instance, ShaderPlatform);
-					LayoutShaderCount += CountLayoutShaders(*Instance, ShaderPlatform, CookedPlatform, InstanceShaderMapCount);
-				}
+				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material instance %s to read its static permutation."), *InstanceData.ObjectPath.ToString());
+				return 0;
 			}
+			const int32 LoadedAssetCount = bWasAssetLoaded ? 0 : 1;
 
+			FStaticPermutationKey Key = MakePermutationKey(*Instance, GetBasePropertyOverridesHash(*Instance));
+			FInstancePermutationRow& Row = Item.InstancePermutationRows.AddDefaulted_GetRef();
+			Row.Path = InstanceData.ObjectPath.ToString();
+			if (Instance->Parent != nullptr) ReadInstancePermutationCells(MasterMaterial, *Instance, Key, Item, Row);
+
+			if (!Instance->bHasStaticPermutationResource) return LoadedAssetCount;
+
+			Item.StaticPermutationInstancePaths.Add(InstanceData.ObjectPath.ToString());
+			// Instances whose key matches the master's or an earlier instance's share that shader map.
+			const bool bAlreadySeen = State.MasterKey.CompilesSameShaders(Key) ||
+				State.PermutationKeys.ContainsByPredicate([&Key](const FStaticPermutationKey& SeenKey)
+				{
+					return SeenKey.CompilesSameShaders(Key);
+				});
+			if (bAlreadySeen) return LoadedAssetCount;
+
+			State.PermutationKeys.Add(MoveTemp(Key));
+			// The layout only covers the instance's active quality level, so it is repeated for each quality shader map.
+			State.LayoutShaderCount += CountLayoutShaders(*Instance, State.ShaderPlatform, CountQualityShaderMaps(*Instance, State.ShaderPlatform));
+			return LoadedAssetCount;
+		}
+
+		/**
+		 * Stores the finished static permutation results of Item.
+		 * Output: Sorts Item's instance rows and permutation paths, fills LayoutShaderCount, and sets
+		 * Item.bShaderPermutationsRead. Resets State so no master is being read.
+		 */
+		static void FinishStaticPermutations(FMaterialAssetData& Item, FPermutationReadState& State)
+		{
 			Item.InstancePermutationRows.Sort([](const FInstancePermutationRow& Left, const FInstancePermutationRow& Right)
 			{
 				return Left.Path < Right.Path;
 			});
-
 			Item.StaticPermutationInstancePaths.Sort();
-			Item.LayoutShaderCount = LayoutShaderCount;
+			Item.LayoutShaderCount = State.LayoutShaderCount;
 			Item.bShaderPermutationsRead = true;
-			return LoadedAssetCount;
+			State = FPermutationReadState();
 		}
 
 		/**
@@ -1305,7 +1448,7 @@ namespace Material
 			const UMaterial* MasterMaterial = Cast<UMaterial>(AssetData.GetAsset());
 			if (MasterMaterial == nullptr)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material %s to read its usage flags."), *AssetData.GetObjectPathString());
+				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material %s to read its usage flags."), *AssetData.ObjectPath.ToString());
 				return false;
 			}
 
@@ -1347,23 +1490,42 @@ namespace Material
 			return UsesByUserPath.Add(UserPath, MoveTemp(Uses));
 		}
 
-		/**
-		 * Reads the Blueprint, Cascade particle system and skeletal mesh users of a material and files each one
-		 * under the usage flags it needs. Blueprints and particle systems are loaded; skeletal meshes are read
-		 * without loading when possible (see GetUserUses). Blueprints and particle systems whose uses of this material are all
-		 * recognised are removed from their broad group; skeletal meshes stay under SkeletalMesh.
-		 * Input: MaterialAndInstances is the master and its counted instances.
-		 * Returns: The number of users loaded from disk.
-		 */
-		int32 ResolveUsersByLoading(FMaterialAssetData& Item, const TArray<FAssetData>& MaterialAndInstances)
+		/** A Blueprint, Cascade particle system or skeletal mesh user to read for Vertex Factory Users. */
+		struct FUserToResolve
 		{
-			TSet<FSoftObjectPath> TreeMaterials;
-			for (const FAssetData& MaterialOrInstance : MaterialAndInstances)
-			{
-				TreeMaterials.Add(MaterialOrInstance.GetSoftObjectPath());
-			}
+			/** Registry user type the user is listed under. */
+			EMaterialUserType Type = EMaterialUserType::Other;
+			/** Object path of the user. */
+			FString Path;
+		};
 
-			int32 LoadedAssetCount = 0;
+		/**
+		 * Progress of resolving one master's users by loading them. Users are read over several ticks, because
+		 * loading a Blueprint can pull in many other assets and take seconds.
+		 */
+		struct FUserResolveState
+		{
+			/** Index in AssetItems of the master whose users are read, or INDEX_NONE when none is being read. */
+			int32 ItemIndex = INDEX_NONE;
+			/** The master and its counted instances, so only uses of these materials are counted. */
+			TSet<FSoftObjectPath> TreeMaterials;
+			/** Users to read, in order. */
+			TArray<FUserToResolve> Users;
+			/** Index in Users of the next user to read. */
+			int32 NextUserIndex = 0;
+			/** Blueprint and particle system users whose uses of the master were all recognised. */
+			TArray<FUserToResolve> FullyResolvedUsers;
+		};
+
+		/**
+		 * Starts resolving the Blueprint, Cascade particle system and skeletal mesh users of Item, which ResolveUser
+		 * then reads one at a time.
+		 * Input: MaterialAndInstances is the master and its counted instances.
+		 * Output: Sets UserResolve for Item, or leaves it unset when Item has no such users.
+		 */
+		void BeginResolvingUsers(FMaterialAssetData& Item, const int32 ItemIndex, const TArray<FAssetData>& MaterialAndInstances)
+		{
+			UserResolve = FUserResolveState();
 			Item.ResolvedUserPathsByUsage.SetNum(MATUSAGE_MAX);
 			const EMaterialUserType ResolvableTypes[] =
 			{
@@ -1373,41 +1535,76 @@ namespace Material
 			};
 			for (const EMaterialUserType UserType : ResolvableTypes)
 			{
-				TArray<FString>& UserPaths = Item.UserPathsByType[static_cast<int32>(UserType)];
-				for (int32 UserIndex = UserPaths.Num() - 1; UserIndex >= 0; --UserIndex)
+				for (const FString& UserPath : Item.UserPathsByType[static_cast<int32>(UserType)])
 				{
-					const FString UserPath = UserPaths[UserIndex];
-					TSet<EMaterialUsage> NeededUsages;
-					bool bHasUnrecognisedUse = false;
-					for (const FMaterialUse& Use : GetUserUses(UserPath, LoadedAssetCount))
-					{
-						const bool bUsesThisMaterial = Use.Materials.Num() == 0 ||
-							Use.Materials.ContainsByPredicate([&TreeMaterials](const FSoftObjectPath& Material)
-							{
-								return TreeMaterials.Contains(Material);
-							});
-						if (!bUsesThisMaterial) continue;
-						if (Use.Usage == MATUSAGE_MAX) bHasUnrecognisedUse = true;
-						else NeededUsages.Add(Use.Usage);
-					}
-
-					for (const EMaterialUsage Usage : NeededUsages)
-					{
-						Item.ResolvedUserPathsByUsage[Usage].AddUnique(UserPath);
-					}
-					const bool bFullyResolved = NeededUsages.Num() > 0 && !bHasUnrecognisedUse;
-					if (UserType != EMaterialUserType::SkeletalMesh && bFullyResolved) UserPaths.RemoveAt(UserIndex);
+					UserResolve.Users.Add({ UserType, UserPath });
 				}
+			}
+			if (UserResolve.Users.Num() == 0) return;
+
+			UserResolve.ItemIndex = ItemIndex;
+			for (const FAssetData& MaterialOrInstance : MaterialAndInstances)
+			{
+				UserResolve.TreeMaterials.Add(MaterialOrInstance.ToSoftObjectPath());
+			}
+		}
+
+		/**
+		 * Reads one user of the master in UserResolve and files it under the usage flags it needs. Blueprints and
+		 * particle systems are loaded; skeletal meshes are read without loading when possible (see GetUserUses).
+		 * Output: Adds the user to Item's resolved users, and to UserResolve.FullyResolvedUsers when it is a
+		 * Blueprint or particle system whose uses of the master are all recognised.
+		 * Returns: The number of users loaded from disk.
+		 */
+		int32 ResolveUser(const FUserToResolve& User, FMaterialAssetData& Item)
+		{
+			int32 LoadedAssetCount = 0;
+			TSet<EMaterialUsage> NeededUsages;
+			bool bHasUnrecognisedUse = false;
+			for (const FMaterialUse& Use : GetUserUses(User.Path, LoadedAssetCount))
+			{
+				const TSet<FSoftObjectPath>& TreeMaterials = UserResolve.TreeMaterials;
+				const bool bUsesThisMaterial = Use.Materials.Num() == 0 ||
+					Use.Materials.ContainsByPredicate([&TreeMaterials](const FSoftObjectPath& Material)
+					{
+						return TreeMaterials.Contains(Material);
+					});
+				if (!bUsesThisMaterial) continue;
+				if (!Use.bRecognised) bHasUnrecognisedUse = true;
+				else if (Use.Usage != MATUSAGE_MAX) NeededUsages.Add(Use.Usage);
+			}
+
+			for (const EMaterialUsage Usage : NeededUsages)
+			{
+				Item.ResolvedUserPathsByUsage[Usage].AddUnique(User.Path);
+			}
+			const bool bFullyResolved = NeededUsages.Num() > 0 && !bHasUnrecognisedUse;
+			if (User.Type != EMaterialUserType::SkeletalMesh && bFullyResolved) UserResolve.FullyResolvedUsers.Add(User);
+			return LoadedAssetCount;
+		}
+
+		/**
+		 * Stores the resolved users of the master in UserResolve: Blueprints and particle systems whose uses were
+		 * all recognised are removed from their broad group; skeletal meshes stay under SkeletalMesh.
+		 * Output: Sorts Item's resolved user lists and resets UserResolve.
+		 */
+		void FinishResolvingUsers(FMaterialAssetData& Item)
+		{
+			for (const FUserToResolve& User : UserResolve.FullyResolvedUsers)
+			{
+				Item.UserPathsByType[static_cast<int32>(User.Type)].Remove(User.Path);
 			}
 			for (TArray<FString>& ResolvedUserPaths : Item.ResolvedUserPathsByUsage)
 			{
 				ResolvedUserPaths.Sort();
 			}
-			return LoadedAssetCount;
+			UserResolve = FUserResolveState();
 		}
 
 		/**
-		 * Fills the report row of one master material, loading it or its users when the settings ask for it.
+		 * Fills the report row of one master material, loading it when the settings ask for it. Users and instances
+		 * that need loading are read on later ticks: with Vertex Factory Users on, UserResolve is set for the
+		 * ResolveUsers step; with Shader Permutations on, PermutationRead is set for the ReadPermutations step.
 		 * Returns: The number of assets this call loaded from disk.
 		 */
 		int32 ProcessMaterial(IAssetRegistry& AssetRegistry, const UAssetAnalyticsSettings& Settings, const FAssetData& AssetData)
@@ -1416,30 +1613,171 @@ namespace Material
 				!Core::HasRelevantReferencer(AssetRegistry, AssetData, Settings.bIgnoreDeveloperReferences)) return 0;
 
 			int32 LoadedAssetCount = 0;
+			const int32 ItemIndex = AssetItems.Num();
 			FMaterialAssetData& Item = AssetItems.Emplace_GetRef(AssetData);
 			if (Settings.bMaterialPackageDiskSize)
 			{
-				FAssetPackageData PackageData;
-				if (AssetRegistry.TryGetAssetPackageData(AssetData.PackageName, PackageData) ==
-					UE::AssetRegistry::EExists::Exists)
+				if (const FAssetPackageData* PackageData = AssetRegistry.GetAssetPackageData(AssetData.PackageName))
 				{
-					Item.PackageDiskSize = PackageData.DiskSize;
+					Item.PackageDiskSize = PackageData->DiskSize;
 				}
 			}
 			if (NeedsInstanceTree(Settings))
 			{
-				Item.Instances = GatherCountedInstances(AssetRegistry, AssetData.GetSoftObjectPath(), Settings);
+				Item.Instances = GatherCountedInstances(AssetRegistry, AssetData.ToSoftObjectPath(), Settings);
 				if (Settings.bMaterialUserTypeCounts)
 				{
 					TArray<FAssetData> MaterialAndInstances = Item.Instances;
 					MaterialAndInstances.Add(AssetData);
 					GatherUsersByType(AssetRegistry, MaterialAndInstances, Settings, Item);
-					if (Settings.bMaterialResolveUsersByLoading) LoadedAssetCount += ResolveUsersByLoading(Item, MaterialAndInstances);
+					if (Settings.bMaterialResolveUsersByLoading) BeginResolvingUsers(Item, ItemIndex, MaterialAndInstances);
 				}
 			}
 			if (Settings.bMaterialUsageFlags && ReadUsageFlags(AssetData, Item)) ++LoadedAssetCount;
-			if (Settings.bMaterialShaderPermutations) LoadedAssetCount += ReadStaticPermutations(AssetData, Item);
+			if (Settings.bMaterialShaderPermutations) LoadedAssetCount += BeginStaticPermutations(AssetData, Item, ItemIndex, PermutationRead);
 			return LoadedAssetCount;
+		}
+
+		/**
+		 * Ends the batch when it is full or no materials are left: when it loaded assets, the next tick unloads them.
+		 * Returns: True when the unload step was started; false when the report keeps processing materials.
+		 */
+		bool TryFinishBatch(const UAssetAnalyticsSettings& Settings)
+		{
+			const int32 MaterialsPerBatch = FMath::Max(Settings.AssetsPerTick, 1);
+			const bool bBatchFinished = MaterialsInBatch >= MaterialsPerBatch || NextAssetIndex >= PendingAssets.Num();
+			if (!bBatchFinished) return false;
+			if (BatchLoadedAssetCount == 0)
+			{
+				MaterialsInBatch = 0;
+				return false;
+			}
+
+			// Unloading can wait on shader compiles, so it gets its own tick and message.
+			PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
+			Step = ERunnerStep::UnloadPackages;
+			ProgressNotification.SetText(FText::Format(
+				LOCTEXT("UnloadingMaterialPackages", "Material Analytics - {0} / {1}\nUnloading {2} packages..."),
+				FText::AsNumber(NextAssetIndex),
+				FText::AsNumber(PendingAssets.Num()),
+				FText::AsNumber(PackageUnloader.GetTrackedPackageCount())));
+			return true;
+		}
+
+		/** Tells the user which master's instances are being read and how far along it is. */
+		void UpdatePermutationNotification() const
+		{
+			const FMaterialAssetData& Item = AssetItems[PermutationRead.ItemIndex];
+			ProgressNotification.SetText(FText::Format(
+				LOCTEXT("ReadingStaticPermutations", "Material Analytics - {0} / {1}\nReading static permutations of {2}: instance {3} / {4}\nInstances with uncached shaders start compiling when they load."),
+				FText::AsNumber(NextAssetIndex),
+				FText::AsNumber(PendingAssets.Num()),
+				FText::FromName(Item.AssetData.AssetName),
+				FText::AsNumber(PermutationRead.NextInstanceIndex),
+				FText::AsNumber(Item.Instances.Num())));
+		}
+
+		/**
+		 * Reads the current master's instances until the tick time budget is used, at least one per tick, so the
+		 * editor keeps repainting and Cancel keeps working while instances load.
+		 * Once all are read, stores the results and ends the batch or goes back to processing materials.
+		 * Returns: True, since the report is still running.
+		 */
+		bool ReadPermutationsForOneTick(const UAssetAnalyticsSettings& Settings)
+		{
+			const double TickStartSeconds = FPlatformTime::Seconds();
+			FMaterialAssetData& Item = AssetItems[PermutationRead.ItemIndex];
+			const UMaterial* MasterMaterial = PermutationRead.MasterMaterial.Get();
+			while (MasterMaterial != nullptr && PermutationRead.NextInstanceIndex < Item.Instances.Num())
+			{
+				const FAssetData& InstanceData = Item.Instances[PermutationRead.NextInstanceIndex];
+				BatchLoadedAssetCount += ReadInstancePermutation(*MasterMaterial, InstanceData, Item, PermutationRead);
+				++PermutationRead.NextInstanceIndex;
+				if (FPlatformTime::Seconds() - TickStartSeconds >= TickTimeBudgetSeconds) break;
+			}
+			if (MasterMaterial != nullptr && PermutationRead.NextInstanceIndex < Item.Instances.Num())
+			{
+				if (FPlatformTime::Seconds() - MaterialStepStartSeconds >= SlowStepMessageDelaySeconds) UpdatePermutationNotification();
+				return true;
+			}
+
+			if (MasterMaterial == nullptr)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics stopped reading the static permutations of %s because it was unloaded."), *Item.AssetData.ObjectPath.ToString());
+			}
+			FinishStaticPermutations(Item, PermutationRead);
+			if (StartNextMaterialStep(Settings)) return true;
+			// The next ProcessMaterials tick completes the report when this was the last material.
+			UpdateProgressNotification();
+			return true;
+		}
+
+		/** Tells the user which master's users are being loaded and how far along it is. */
+		void UpdateUserResolveNotification() const
+		{
+			const FMaterialAssetData& Item = AssetItems[UserResolve.ItemIndex];
+			ProgressNotification.SetText(FText::Format(
+				LOCTEXT("ResolvingMaterialUsers", "Material Analytics - {0} / {1}\nLoading users of {2}: {3} / {4}"),
+				FText::AsNumber(NextAssetIndex),
+				FText::AsNumber(PendingAssets.Num()),
+				FText::FromName(Item.AssetData.AssetName),
+				FText::AsNumber(UserResolve.NextUserIndex),
+				FText::AsNumber(UserResolve.Users.Num())));
+		}
+
+		/**
+		 * Reads the current master's users until the tick time budget is used, at least one per tick, so the editor
+		 * keeps repainting and Cancel keeps working while Blueprints and particle systems load.
+		 * Once all are read, stores the results and moves to the master's next step.
+		 * Returns: True, since the report is still running.
+		 */
+		bool ResolveUsersForOneTick(const UAssetAnalyticsSettings& Settings)
+		{
+			const double TickStartSeconds = FPlatformTime::Seconds();
+			FMaterialAssetData& Item = AssetItems[UserResolve.ItemIndex];
+			while (UserResolve.NextUserIndex < UserResolve.Users.Num())
+			{
+				BatchLoadedAssetCount += ResolveUser(UserResolve.Users[UserResolve.NextUserIndex], Item);
+				++UserResolve.NextUserIndex;
+				if (FPlatformTime::Seconds() - TickStartSeconds >= TickTimeBudgetSeconds) break;
+			}
+			if (UserResolve.NextUserIndex < UserResolve.Users.Num())
+			{
+				if (FPlatformTime::Seconds() - MaterialStepStartSeconds >= SlowStepMessageDelaySeconds) UpdateUserResolveNotification();
+				return true;
+			}
+
+			FinishResolvingUsers(Item);
+			if (StartNextMaterialStep(Settings)) return true;
+			// The next ProcessMaterials tick completes the report when this was the last material.
+			UpdateProgressNotification();
+			return true;
+		}
+
+		/**
+		 * Moves on once a master's row, or one of its loading steps, is done: its users are loaded first, then its
+		 * instances are read, then the batch ends or the report goes back to processing materials.
+		 * Returns: True when the next tick runs another step; false when materials can keep being processed.
+		 */
+		bool StartNextMaterialStep(const UAssetAnalyticsSettings& Settings)
+		{
+			// The step's own message only replaces the progress text once the step is slow; see SlowStepMessageDelaySeconds.
+			if (UserResolve.ItemIndex != INDEX_NONE)
+			{
+				Step = ERunnerStep::ResolveUsers;
+				MaterialStepStartSeconds = FPlatformTime::Seconds();
+				UpdateProgressNotification();
+				return true;
+			}
+			if (PermutationRead.ItemIndex != INDEX_NONE)
+			{
+				Step = ERunnerStep::ReadPermutations;
+				MaterialStepStartSeconds = FPlatformTime::Seconds();
+				UpdateProgressNotification();
+				return true;
+			}
+			Step = ERunnerStep::ProcessMaterials;
+			return TryFinishBatch(Settings);
 		}
 
 		/**
@@ -1451,7 +1789,6 @@ namespace Material
 		{
 			const double TickStartSeconds = FPlatformTime::Seconds();
 			const bool bLoadsAssets = NeedsAssetLoading(Settings);
-			const int32 MaterialsPerBatch = FMath::Max(Settings.AssetsPerTick, 1);
 			while (NextAssetIndex < PendingAssets.Num())
 			{
 				// Snapshot loaded packages so everything this batch loads, including dependencies, can be unloaded afterwards.
@@ -1468,23 +1805,8 @@ namespace Material
 				++NextAssetIndex;
 				++MaterialsInBatch;
 
-				const bool bBatchFinished = MaterialsInBatch >= MaterialsPerBatch || NextAssetIndex >= PendingAssets.Num();
-				if (bBatchFinished)
-				{
-					if (BatchLoadedAssetCount > 0)
-					{
-						// Unloading can wait on shader compiles, so it gets its own tick and message.
-						PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
-						Step = ERunnerStep::UnloadPackages;
-						ProgressNotification.SetText(FText::Format(
-							LOCTEXT("UnloadingMaterialPackages", "Material Analytics - {0} / {1}\nUnloading {2} packages..."),
-							FText::AsNumber(NextAssetIndex),
-							FText::AsNumber(PendingAssets.Num()),
-							FText::AsNumber(PackageUnloader.GetTrackedPackageCount())));
-						return true;
-					}
-					MaterialsInBatch = 0;
-				}
+				// The master's users and instances are loaded on the following ticks; the batch ends after them.
+				if (StartNextMaterialStep(Settings)) return true;
 				if (FPlatformTime::Seconds() - TickStartSeconds >= TickTimeBudgetSeconds) break;
 			}
 
@@ -1556,6 +1878,12 @@ namespace Material
 			case ERunnerStep::ProcessMaterials:
 				return ProcessMaterialsForOneTick(AssetRegistry, *Settings);
 
+			case ERunnerStep::ResolveUsers:
+				return ResolveUsersForOneTick(*Settings);
+
+			case ERunnerStep::ReadPermutations:
+				return ReadPermutationsForOneTick(*Settings);
+
 			case ERunnerStep::UnloadPackages:
 				PackageUnloader.UnloadReportPackages();
 				UE_LOG(
@@ -1588,7 +1916,7 @@ namespace Material
 				const FString LeftName = Left.AssetData.AssetName.ToString();
 				const FString RightName = Right.AssetData.AssetName.ToString();
 				if (LeftName != RightName) return LeftName < RightName;
-				return Left.AssetData.GetSoftObjectPath().LexicalLess(Right.AssetData.GetSoftObjectPath());
+				return Left.AssetData.ObjectPath.LexicalLess(Right.AssetData.ObjectPath);
 			});
 
 			const FString ReportDirectory = FPaths::Combine(
@@ -1654,7 +1982,7 @@ namespace Material
 				Writer.WriteArrayStart(TEXT("Instances"));
 				for (const FAssetData& Instance : Item.Instances)
 				{
-					Writer.WriteValue(Instance.GetObjectPathString());
+					Writer.WriteValue(Instance.ObjectPath.ToString());
 				}
 				Writer.WriteArrayEnd();
 			}
@@ -1809,7 +2137,7 @@ namespace Material
 			Writer->WriteObjectStart();
 			// The shader platform the counts are for. Index matches the Platform column of a cook's MaterialStats CSV.
 			Writer->WriteObjectStart(TEXT("ShaderPlatform"));
-			Writer->WriteValue(TEXT("Name"), FDataDrivenShaderPlatformInfo::GetName(GMaxRHIShaderPlatform).ToString());
+			Writer->WriteValue(TEXT("Name"), LexToString(GMaxRHIShaderPlatform));
 			Writer->WriteValue(TEXT("Index"), static_cast<int32>(GMaxRHIShaderPlatform));
 			Writer->WriteObjectEnd();
 			Writer->WriteArrayStart(TEXT("Materials"));
@@ -1827,6 +2155,11 @@ namespace Material
 		static constexpr double NotificationDisplayDelaySeconds = 0.2;
 		/** Longest time one tick spends processing materials before letting the editor repaint. */
 		static constexpr double TickTimeBudgetSeconds = 0.05;
+		/**
+		 * How long a master's user or instance step runs before the notification switches to that step's message.
+		 * Quick steps keep the normal progress text, so the message does not flicker too fast to read.
+		 */
+		static constexpr double SlowStepMessageDelaySeconds = 1.0;
 		/** Report rows gathered so far, one per processed master material. */
 		TArray<FMaterialAssetData> AssetItems;
 		/** Master materials found in the configured folders, processed in order. */
@@ -1842,7 +2175,7 @@ namespace Material
 		/** Unloads the packages each batch loaded. */
 		Core::FReportPackageUnloader PackageUnloader;
 		/** Ticker that runs Tick while a report is in progress; invalid when idle. */
-		FTSTicker::FDelegateHandle TickerHandle;
+		FDelegateHandle TickerHandle;
 		/** Notification that shows the report progress and the Cancel button. */
 		Core::FReportProgressNotification ProgressNotification;
 		/** Index in PendingAssets of the next master material to process. */
@@ -1861,6 +2194,12 @@ namespace Material
 		TSet<UPackage*> PackagesBeforeBatch;
 		/** Name of the last material processed, shown in the notification. */
 		FString CurrentAssetName;
+		/** When the current master's user or instance step started, to tell whether it is slow. */
+		double MaterialStepStartSeconds = 0.0;
+		/** Users of the master whose users are being loaded, while Step is ResolveUsers. */
+		FUserResolveState UserResolve;
+		/** Static permutations of the master whose instances are being read, while Step is ReadPermutations. */
+		FPermutationReadState PermutationRead;
 	};
 
 	static TUniquePtr<FMaterialAnalyticsRunner> MaterialAnalyticsRunner;

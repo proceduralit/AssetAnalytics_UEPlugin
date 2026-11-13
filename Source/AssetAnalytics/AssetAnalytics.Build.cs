@@ -31,10 +31,18 @@ public class AssetAnalytics : ModuleRules
 				"HTTPServer",
 				"Json",
 				"MaterialShaderQualitySettings",
+				"RenderCore",
 				"RHI",
-				"Sockets",
 				"TargetPlatform",
 				"ToolMenus",
+			}
+			);
+
+		// Headers only: the material shader count builds the Renderer's shader permutation parameter structs.
+		PrivateIncludePathModuleNames.AddRange(
+			new string[]
+			{
+				"Renderer",
 			}
 			);
 	}

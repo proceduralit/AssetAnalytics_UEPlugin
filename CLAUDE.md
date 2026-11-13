@@ -5,11 +5,12 @@ Editor-only plugin (all modules are `Type: Editor` in the .uplugin). It never sh
 - Don't add Runtime modules or change module types without asking.
 
 ## Environment
-- Engine: `D:/Gamedev/UE_5.7`
+- Engine: `D:/Gamedev/SCUMGame/Engine` (licensee UE 4.27.2 source build; compile as C++14, no C++17 features)
 - Host project: the `.uproject` two folders above this file (`../../*.uproject`).
-  This plugin lives in that project's `Plugins/` folder.
-- Build: `"D:/Gamedev/UE_5.7/Engine/Build/BatchFiles/Build.bat" DarkRuinsMegascansSampleEditor Win64 Development -Project="D:/Mohsen/Playground/DarkRuinsMegascansSample/DarkRuinsMegascansSample.uproject" -WaitMutex -NoHotReloadFromIDE`
-- After C++ changes, build and fix errors before finishing. If building isn't possible, verify edits didn't alter declarations, macros, includes, or signatures.
+  This plugin lives in that project's `Plugins/` folder, inside a Perforce workspace: never run P4 operations, and never change the `.uproject`.
+- Build: `"D:/Gamedev/SCUMGame/Engine/Build/BatchFiles/Build.bat" SCUMEditor Win64 Development -Project="D:/Gamedev/SCUMGame/SCUM/SCUM.uproject" -WaitMutex`
+  The editor is not built locally, so the user builds it and reports errors.
+- After C++ changes, build and fix errors before finishing. If building isn't possible, verify edits didn't alter declarations, macros, includes, or signatures, and check every engine API against the 4.27 headers.
 
 ## Scope
 - Change only what the task needs; suggest unrelated improvements instead of making them.

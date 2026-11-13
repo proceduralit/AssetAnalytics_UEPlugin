@@ -16,7 +16,6 @@
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
-#include "Interfaces/Interface_AsyncCompilation.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -64,12 +63,6 @@ namespace Mesh
 		int32 ComplexCollisionVertices = INDEX_NONE;
 		/** Triangles in LOD 0. */
 		int32 TriangleCount = INDEX_NONE;
-		/** Whether Nanite is enabled on the mesh. */
-		bool bNaniteEnabled = false;
-		/** Triangles in the Nanite mesh. */
-		int32 NaniteTriangles = INDEX_NONE;
-		/** Percentage of Nanite triangles kept in the fallback mesh. Skeletal meshes have none. */
-		double NaniteFallbackPercent = -1.0;
 		/** Number of material slots. */
 		int32 MaterialSlotCount = INDEX_NONE;
 		/** Object paths of the materials and material instances the mesh's package references, sorted. */
@@ -122,7 +115,8 @@ namespace Mesh
 			if (Material == nullptr) continue;
 
 			TArray<UTexture*> MaterialTextures;
-			Material->GetUsedTextures(MaterialTextures);
+			// UE 4.27 has no default arguments here: all quality and feature levels, including unused textures.
+			Material->GetUsedTextures(MaterialTextures, EMaterialQualityLevel::Num, true, ERHIFeatureLevel::Num, true);
 			for (UTexture* Texture : MaterialTextures)
 			{
 				if (Texture != nullptr) UniqueTextures.Add(Texture);
@@ -167,7 +161,9 @@ namespace Mesh
 		if (Settings.bPhysicsSize && Item.PhysicsSize < 0)
 		{
 			Item.PhysicsSize = 0;
-			if (UBodySetup* MeshBodySetup = SkeletalMesh.GetBodySetup())
+			// The const overload only reads; the non-const one creates a body setup when the mesh has none.
+			const USkeletalMesh& ConstSkeletalMesh = SkeletalMesh;
+			if (UBodySetup* MeshBodySetup = ConstSkeletalMesh.GetBodySetup())
 			{
 				FResourceSizeEx EstimatedSize(EResourceSizeMode::EstimatedTotal);
 				MeshBodySetup->GetResourceSizeEx(EstimatedSize);
@@ -217,7 +213,7 @@ namespace Mesh
 		FMeshAssetData& Item)
 	{
 		if (Settings.bLODCount) Item.LODCount = StaticMesh.GetNumLODs();
-		if (Settings.bLODGroup) Item.LODGroup = StaticMesh.GetLODGroup().ToString();
+		if (Settings.bLODGroup) Item.LODGroup = StaticMesh.LODGroup.ToString();
 		if (Settings.bPhysicsSize && Item.PhysicsSize < 0)
 		{
 			Item.PhysicsSize = 0;
@@ -289,12 +285,14 @@ namespace Mesh
 		for (const FName Dependency : Dependencies)
 		{
 			TArray<FAssetData> DependencyAssets;
-			AssetRegistry.GetAssetsByPackageName(Dependency, DependencyAssets);
+			// On-disk data only: UE 4.27 finds in-memory assets by iterating every loaded object, which is slow per call.
+			AssetRegistry.GetAssetsByPackageName(Dependency, DependencyAssets, /*bIncludeOnlyOnDiskAssets*/ true);
 			for (const FAssetData& DependencyAsset : DependencyAssets)
 			{
-				if (DependencyAsset.IsInstanceOf(UMaterialInterface::StaticClass()))
+				const UClass* DependencyClass = DependencyAsset.GetClass();
+				if (DependencyClass != nullptr && DependencyClass->IsChildOf(UMaterialInterface::StaticClass()))
 				{
-					MaterialPaths.Add(DependencyAsset.GetObjectPathString());
+					MaterialPaths.Add(DependencyAsset.ObjectPath.ToString());
 				}
 			}
 		}
@@ -309,28 +307,16 @@ namespace Mesh
 		const UAssetAnalyticsSettings& Settings,
 		FMeshAssetData& Item)
 	{
-		Item.bIsSkeletalMesh = AssetData.AssetClassPath == USkeletalMesh::StaticClass()->GetClassPathName();
+		Item.bIsSkeletalMesh = AssetData.AssetClass == USkeletalMesh::StaticClass()->GetFName();
 		if (Settings.bPackageDiskSize)
 		{
-			FAssetPackageData PackageData;
-			if (AssetRegistry.TryGetAssetPackageData(AssetData.PackageName, PackageData) ==
-				UE::AssetRegistry::EExists::Exists)
+			if (const FAssetPackageData* PackageData = AssetRegistry.GetAssetPackageData(AssetData.PackageName))
 			{
-				Item.PackageDiskSize = PackageData.DiskSize;
+				Item.PackageDiskSize = PackageData->DiskSize;
 			}
 		}
-		if (Settings.bPhysicsSize) AssetData.GetTagValue(TEXT("PhysicsSize"), Item.PhysicsSize);
 		if (Settings.bLODCount) AssetData.GetTagValue(TEXT("LODs"), Item.LODCount);
 		if (Settings.bTriangleCount) AssetData.GetTagValue(TEXT("Triangles"), Item.TriangleCount);
-		if (Settings.bNaniteInfo)
-		{
-			AssetData.GetTagValue(TEXT("NaniteEnabled"), Item.bNaniteEnabled);
-			AssetData.GetTagValue(TEXT("NaniteTriangles"), Item.NaniteTriangles);
-			if (!Item.bIsSkeletalMesh)
-			{
-				AssetData.GetTagValue(TEXT("NaniteFallbackPercent"), Item.NaniteFallbackPercent);
-			}
-		}
 		if (Settings.bMaterialCount) Item.MaterialPaths = FindReferencedMaterials(AssetRegistry, AssetData);
 
 		// Skeletal meshes have no LOD group and do not store the remaining tags.
@@ -401,9 +387,9 @@ namespace Mesh
 		const FAssetData& AssetData,
 		const UAssetAnalyticsSettings& Settings)
 	{
-		const bool bIsSkeletalMesh = AssetData.AssetClassPath == USkeletalMesh::StaticClass()->GetClassPathName();
-		int64 CachedPhysicsSize = -1;
-		if (Settings.bPhysicsSize && !AssetData.GetTagValue(TEXT("PhysicsSize"), CachedPhysicsSize)) return true;
+		const bool bIsSkeletalMesh = AssetData.AssetClass == USkeletalMesh::StaticClass()->GetFName();
+		// UE 4.27 meshes save no PhysicsSize registry tag, so physics size always needs the mesh.
+		if (Settings.bPhysicsSize) return true;
 		if (Settings.bTextureCount || Settings.bMaxTextureResolution) return true;
 		if (bIsSkeletalMesh)
 		{
@@ -429,16 +415,6 @@ namespace Mesh
 		return Item;
 	}
 
-	/**
-	 * Returns whether MeshAsset is still building its render data, such as Nanite data after a cache miss.
-	 * Reading a mesh while it builds blocks the editor until the build finishes.
-	 */
-	static bool IsMeshBuilding(UObject* MeshAsset)
-	{
-		const IInterface_AsyncCompilation* AsyncCompilation = Cast<IInterface_AsyncCompilation>(MeshAsset);
-		return AsyncCompilation != nullptr && AsyncCompilation->IsCompiling();
-	}
-
 	/** Gathers the Mesh Analytics report over several editor ticks and saves it when done. */
 	class FMeshAnalyticsRunner
 	{
@@ -457,7 +433,7 @@ namespace Mesh
 			// Work is split into small steps run on separate ticks, so the editor repaints the notification in between.
 			Step = ERunnerStep::ShowNotification;
 			StepStartSeconds = FPlatformTime::Seconds();
-			TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+			TickerHandle = FTicker::GetCoreTicker().AddTicker(
 				FTickerDelegate::CreateRaw(this, &FMeshAnalyticsRunner::Tick));
 		}
 
@@ -480,8 +456,6 @@ namespace Mesh
 			FindMeshes,
 			/** Fills report rows within a per-tick time budget. */
 			ProcessMeshes,
-			/** Waits without blocking until the batch's meshes finish building, then fills their rows. */
-			WaitForMeshBuilds,
 			/** Unloads the packages loaded by the finished batch. */
 			UnloadPackages
 		};
@@ -500,23 +474,11 @@ namespace Mesh
 				FText::FromString(CurrentAssetName)));
 		}
 
-		/** Tells the user how many meshes of the batch are still building, naming one of them. */
-		void UpdateMeshBuildNotification() const
-		{
-			ProgressNotification.SetText(FText::Format(
-				LOCTEXT("WaitingForMeshBuilds", "Mesh Analytics - {0} / {1}\nWaiting for {2} meshes to finish building Nanite and render data...\n{3}"),
-				FText::AsNumber(NextAssetIndex),
-				FText::AsNumber(PendingAssets.Num()),
-				FText::AsNumber(MeshesWaitingForBuild.Num()),
-				FText::FromName(MeshesWaitingForBuild[0].AssetData.AssetName)));
-		}
-
 		/** Clears pending assets, finished rows and the batch state. */
 		void ResetReportData()
 		{
 			PendingAssets.Reset();
 			AssetItems.Reset();
-			MeshesWaitingForBuild.Reset();
 			NextAssetIndex = 0;
 			AssetsInBatch = 0;
 			BatchLoadedAssetCount = 0;
@@ -535,7 +497,7 @@ namespace Mesh
 		{
 			if (TickerHandle.IsValid())
 			{
-				FTSTicker::RemoveTicker(TickerHandle);
+				FTicker::GetCoreTicker().RemoveTicker(TickerHandle);
 				TickerHandle.Reset();
 			}
 			TrackUnfinishedBatch();
@@ -557,8 +519,8 @@ namespace Mesh
 		{
 			const UAssetAnalyticsSettings* Settings = GetDefault<UAssetAnalyticsSettings>();
 			FARFilter Filter;
-			if (Settings->bStaticMeshes) Filter.ClassPaths.Add(UStaticMesh::StaticClass()->GetClassPathName());
-			if (Settings->bSkeletalMeshes) Filter.ClassPaths.Add(USkeletalMesh::StaticClass()->GetClassPathName());
+			if (Settings->bStaticMeshes) Filter.ClassNames.Add(UStaticMesh::StaticClass()->GetFName());
+			if (Settings->bSkeletalMeshes) Filter.ClassNames.Add(USkeletalMesh::StaticClass()->GetFName());
 			Filter.bRecursivePaths = true;
 			for (const FDirectoryPath& Directory : Settings->SearchFolders)
 			{
@@ -576,7 +538,7 @@ namespace Mesh
 						*Directory.Path);
 				}
 			}
-			if (Filter.ClassPaths.Num() == 0 || Filter.PackagePaths.Num() == 0) return;
+			if (Filter.ClassNames.Num() == 0 || Filter.PackagePaths.Num() == 0) return;
 
 			TArray<FString> PathsToScan;
 			for (const FName PackagePath : Filter.PackagePaths)
@@ -589,7 +551,7 @@ namespace Mesh
 
 		/**
 		 * Fills the report row of one mesh asset, loading it only for columns that require it.
-		 * A loaded mesh that is still building is added to MeshesWaitingForBuild instead, and gets its row once built.
+		 * UE 4.27 builds meshes while loading them, so a loaded mesh can be read straight away.
 		 * Returns: True when this call loaded the asset from disk.
 		 */
 		bool ProcessMeshAsset(IAssetRegistry& AssetRegistry, const UAssetAnalyticsSettings& Settings, const FAssetData& AssetData)
@@ -604,8 +566,7 @@ namespace Mesh
 				bWasAssetLoaded = AssetData.IsAssetLoaded();
 				MeshAsset = AssetData.GetAsset();
 			}
-			if (IsMeshBuilding(MeshAsset)) MeshesWaitingForBuild.Add({ AssetData, MeshAsset });
-			else AssetItems.Add(MakeMeshAssetData(AssetRegistry, AssetData, MeshAsset, Settings));
+			AssetItems.Add(MakeMeshAssetData(AssetRegistry, AssetData, MeshAsset, Settings));
 			return !bWasAssetLoaded && MeshAsset != nullptr;
 		}
 
@@ -628,35 +589,6 @@ namespace Mesh
 				FText::AsNumber(NextAssetIndex),
 				FText::AsNumber(PendingAssets.Num()),
 				FText::AsNumber(PackageUnloader.GetTrackedPackageCount())));
-			return true;
-		}
-
-		/**
-		 * Fills the rows of waiting meshes whose builds have finished, without waiting for the others.
-		 * Once none are left, ends the batch and goes back to processing meshes or unloading the batch.
-		 * Returns: True, since the report is still running.
-		 */
-		bool GatherBuiltMeshes(IAssetRegistry& AssetRegistry, const UAssetAnalyticsSettings& Settings)
-		{
-			for (int32 WaitingIndex = MeshesWaitingForBuild.Num() - 1; WaitingIndex >= 0; --WaitingIndex)
-			{
-				const FMeshWaitingForBuild& WaitingMesh = MeshesWaitingForBuild[WaitingIndex];
-				// A mesh that is no longer loaded still gets the row its registry data gives.
-				UObject* MeshAsset = WaitingMesh.MeshAsset.Get();
-				if (IsMeshBuilding(MeshAsset)) continue;
-				AssetItems.Add(MakeMeshAssetData(AssetRegistry, WaitingMesh.AssetData, MeshAsset, Settings));
-				MeshesWaitingForBuild.RemoveAtSwap(WaitingIndex);
-			}
-			if (MeshesWaitingForBuild.Num() > 0)
-			{
-				UpdateMeshBuildNotification();
-				return true;
-			}
-
-			if (TryStartUnloadingBatch()) return true;
-			// The next ProcessMeshes tick completes the report when this was the last batch.
-			Step = ERunnerStep::ProcessMeshes;
-			UpdateProgressNotification();
 			return true;
 		}
 
@@ -687,17 +619,7 @@ namespace Mesh
 				++AssetsInBatch;
 
 				const bool bBatchFinished = AssetsInBatch >= AssetsPerBatch || NextAssetIndex >= PendingAssets.Num();
-				if (bBatchFinished)
-				{
-					// The batch stays loaded until its building meshes are gathered, polled each tick so the editor stays responsive.
-					if (MeshesWaitingForBuild.Num() > 0)
-					{
-						Step = ERunnerStep::WaitForMeshBuilds;
-						UpdateMeshBuildNotification();
-						return true;
-					}
-					if (TryStartUnloadingBatch()) return true;
-				}
+				if (bBatchFinished && TryStartUnloadingBatch()) return true;
 				if (FPlatformTime::Seconds() - TickStartSeconds >= TickTimeBudgetSeconds) break;
 			}
 
@@ -763,9 +685,6 @@ namespace Mesh
 			case ERunnerStep::ProcessMeshes:
 				return ProcessMeshesForOneTick(AssetRegistry, *Settings);
 
-			case ERunnerStep::WaitForMeshBuilds:
-				return GatherBuiltMeshes(AssetRegistry, *Settings);
-
 			case ERunnerStep::UnloadPackages:
 				PackageUnloader.UnloadReportPackages();
 				UE_LOG(
@@ -798,7 +717,7 @@ namespace Mesh
 				const FString LeftName = Left.AssetData.AssetName.ToString();
 				const FString RightName = Right.AssetData.AssetName.ToString();
 				if (LeftName != RightName) return LeftName < RightName;
-				return Left.AssetData.GetSoftObjectPath().LexicalLess(Right.AssetData.GetSoftObjectPath());
+				return Left.AssetData.ObjectPath.LexicalLess(Right.AssetData.ObjectPath);
 			});
 
 			const FString ReportDirectory = FPaths::Combine(
@@ -883,12 +802,6 @@ namespace Mesh
 			if (Settings.bPhysicsSize) WriteNumberOrNull(Writer, TEXT("PhysicsSize"), Item.PhysicsSize);
 			if (Settings.bComplexCollisionInfo) WriteNumberOrNull(Writer, TEXT("ComplexCollisionVertices"), Item.ComplexCollisionVertices);
 			if (Settings.bTriangleCount) WriteNumberOrNull(Writer, TEXT("LOD0Triangles"), Item.TriangleCount);
-			if (Settings.bNaniteInfo)
-			{
-				Writer.WriteValue(TEXT("NaniteEnabled"), Item.bNaniteEnabled);
-				WriteNumberOrNull(Writer, TEXT("NaniteTriangles"), Item.NaniteTriangles);
-				WriteNumberOrNull(Writer, TEXT("NaniteFallbackPercent"), Item.NaniteFallbackPercent);
-			}
 			if (Settings.bMaterialCount)
 			{
 				WriteNumberOrNull(Writer, TEXT("MaterialSlots"), Item.MaterialSlotCount);
@@ -929,25 +842,14 @@ namespace Mesh
 		static constexpr double NotificationDisplayDelaySeconds = 0.2;
 		/** Longest time one tick spends processing assets before letting the editor repaint. */
 		static constexpr double TickTimeBudgetSeconds = 0.05;
-		/** A loaded mesh of the current batch whose render data is still building. */
-		struct FMeshWaitingForBuild
-		{
-			/** Registry entry of the mesh. */
-			FAssetData AssetData;
-			/** The loaded mesh, read once its build finishes. */
-			TWeakObjectPtr<UObject> MeshAsset;
-		};
-
 		/** Report rows gathered so far, one per processed mesh. */
 		TArray<FMeshAssetData> AssetItems;
-		/** Meshes of the current batch still building; the batch is not unloaded until they are gathered. */
-		TArray<FMeshWaitingForBuild> MeshesWaitingForBuild;
 		/** Meshes found in the configured folders, processed in order. */
 		TArray<FAssetData> PendingAssets;
 		/** Unloads the packages each batch loaded. */
 		Core::FReportPackageUnloader PackageUnloader;
 		/** Ticker that runs Tick while a report is in progress; invalid when idle. */
-		FTSTicker::FDelegateHandle TickerHandle;
+		FDelegateHandle TickerHandle;
 		/** Notification that shows the report progress and the Cancel button. */
 		Core::FReportProgressNotification ProgressNotification;
 		/** Index in PendingAssets of the next mesh to process. */

@@ -10,11 +10,9 @@
 #include "HttpServerResponse.h"
 #include "IContentBrowserSingleton.h"
 #include "IHttpRouter.h"
-#include "IPAddress.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "UObject/SoftObjectPath.h"
 
 namespace AssetAnalytics
 {
@@ -34,15 +32,6 @@ namespace Core
 	FString GetMaterialAnalyticsReportUrl()
 	{
 		return FString::Printf(TEXT("http://127.0.0.1:%u%s?type=material"), ReportBridgePort, ReportPageRoutePath);
-	}
-
-	/** Returns whether Request came from this machine. */
-	static bool IsLoopbackRequest(const FHttpServerRequest& Request)
-	{
-		const FString PeerAddress = Request.PeerAddress.IsValid()
-			? Request.PeerAddress->ToString(false)
-			: FString();
-		return PeerAddress == TEXT("::1") || PeerAddress.StartsWith(TEXT("127."));
 	}
 
 	/** Returns the full path to RelativePath inside the plugin folder. */
@@ -70,21 +59,16 @@ namespace Core
 		return Response;
 	}
 
-	/** Loads FilePath and sends it back with ContentType when Request is local. */
+	/**
+	 * Loads FilePath and sends it back with ContentType.
+	 * UE 4.27 requests carry no peer address; the 4.27 listener only binds to 127.0.0.1, so every request is local.
+	 */
 	static bool HandleReportFileRequest(
 		const FHttpServerRequest& Request,
 		const FHttpResultCallback& OnComplete,
 		const FString& FilePath,
 		const FString& ContentType)
 	{
-		if (!IsLoopbackRequest(Request))
-		{
-			OnComplete(MakeReportBridgeResponse(
-				TEXT("Only loopback requests are accepted."),
-				EHttpServerResponseCodes::Forbidden));
-			return true;
-		}
-
 		TArray<uint8> FileContents;
 		if (!FFileHelper::LoadFileToArray(FileContents, *FilePath))
 		{
@@ -102,19 +86,11 @@ namespace Core
 		return true;
 	}
 
-	/** Reads an asset link from Request and selects that asset in the Content Browser. */
+	/** Reads an asset link from Request and selects that asset in the Content Browser. Requests are local, as for HandleReportFileRequest. */
 	static bool HandleReportBridgeRequest(
 		const FHttpServerRequest& Request,
 		const FHttpResultCallback& OnComplete)
 	{
-		if (!IsLoopbackRequest(Request))
-		{
-			OnComplete(MakeReportBridgeResponse(
-				TEXT("Only loopback requests are accepted."),
-				EHttpServerResponseCodes::Forbidden));
-			return true;
-		}
-
 		if (Request.Verb == EHttpServerRequestVerbs::VERB_OPTIONS)
 		{
 			OnComplete(MakeReportBridgeResponse(FString(), EHttpServerResponseCodes::NoContent));
@@ -144,7 +120,7 @@ namespace Core
 		FAssetRegistryModule& AssetRegistryModule =
 			FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 		const FAssetData AssetData =
-			AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(ObjectPath));
+			AssetRegistryModule.Get().GetAssetByObjectPath(FName(*ObjectPath));
 		if (!AssetData.IsValid())
 		{
 			OnComplete(MakeReportBridgeResponse(
@@ -166,7 +142,8 @@ namespace Core
 	/** Starts the local report server and registers all report routes. */
 	void FAssetAnalyticsReportBridge::Start()
 	{
-		ReportHttpRouter = FHttpServerModule::Get().GetHttpRouter(ReportBridgePort, true);
+		// UE 4.27 only logs an error when the port is busy and still returns a router.
+		ReportHttpRouter = FHttpServerModule::Get().GetHttpRouter(ReportBridgePort);
 		if (!ReportHttpRouter.IsValid())
 		{
 			UE_LOG(LogTemp, Warning, TEXT("Asset Analytics report bridge could not bind to port %u."), ReportBridgePort);
@@ -176,7 +153,7 @@ namespace Core
 		SelectAssetRoute = ReportHttpRouter->BindRoute(
 			FHttpPath(ReportBridgeRoute),
 			EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_OPTIONS,
-			FHttpRequestHandler::CreateStatic(&HandleReportBridgeRequest));
+			FHttpRequestHandler(&HandleReportBridgeRequest));
 
 		// One page shows every report type; its ?type= picks the type and the JSON route it loads.
 		// The page loads the other files by these names relative to its own route.
@@ -206,7 +183,7 @@ namespace Core
 			ReportFileRoutes.Add(ReportHttpRouter->BindRoute(
 				FHttpPath(FileRoute.RoutePath),
 				EHttpServerRequestVerbs::VERB_GET,
-				FHttpRequestHandler::CreateLambda(
+				FHttpRequestHandler(
 					[FilePath = FileRoute.FilePath, ContentType = FString(FileRoute.ContentType)](
 						const FHttpServerRequest& Request,
 						const FHttpResultCallback& OnComplete)
