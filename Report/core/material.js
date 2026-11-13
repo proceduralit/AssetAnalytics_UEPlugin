@@ -45,6 +45,10 @@
         // since they may be used a lot by levels, widgets or other assets the report does not check.
         { key: "TotalUsers", label: "Total Users", type: "number", axis: true, filter: true, unknownPlotValue: -1,
             value: material => hasUsers(material) ? countUsers(material) : undefined },
+        // Picks out the materials plotted at Unknown Total Users ("No"). Hidden, like Total Users, when the report
+        // lists no users at all.
+        { key: "UsersKnown", label: "Users Known", type: "string", filter: true,
+            value: material => anyMaterialHasUsers ? (hasUsers(material) ? "Yes" : "No") : undefined },
         { key: "EnabledUsageFlags", label: "Enabled Usage Flags", type: "number", axis: true,
             value: material => material.UsageFlagsRead ? summarizeUsage(material).enabledCount : undefined },
         { key: "EnabledUnusedFlags", label: "Enabled but Unused Flags", type: "number", axis: true,
@@ -55,6 +59,8 @@
 
     // The report engine's callbacks, given to init.
     let report = null;
+    // True when some material in the shown report has a users list, so Users Known has something to compare.
+    let anyMaterialHasUsers = false;
     // How many materials the page shows, for the cook stats summary. 0 before a report is shown.
     let shownMaterialCount = 0;
     // The ShaderPlatform object of the loaded report ({ Name, Index }), or null for older reports.
@@ -125,7 +131,7 @@
         const platforms = new Map();
         lines.slice(1).forEach(line => {
             const fields = parseCsvLine(line);
-            const path = fields[pathIndex];
+            const path = toPackagePath(fields[pathIndex]);
             const cooked = Number(fields[cookedIndex]);
             if (!path || !Number.isFinite(cooked)) {
                 return;
@@ -141,6 +147,15 @@
             throw new Error("The cook stats CSV has no material rows.");
         }
         return platforms;
+    }
+
+    // Returns the package path of a CSV Path. UE 4 writes object paths ("/Game/M_Base.M_Base") while UE 5 writes
+    // package paths ("/Game/M_Base"); the report matches on package paths. Returns "" for an empty path.
+    function toPackagePath(path) {
+        const text = path ?? "";
+        const lastSlash = text.lastIndexOf("/");
+        const dot = text.indexOf(".", lastSlash + 1);
+        return dot < 0 ? text : text.substring(0, dot);
     }
 
     // Splits one CSV line into fields, handling quoted fields and doubled quotes inside them.
@@ -600,6 +615,7 @@
         },
         // Matches the cook stats against the materials before their rows are built, as the shader columns read them.
         beforeBuild: reportMaterials => {
+            anyMaterialHasUsers = reportMaterials.some(hasUsers);
             updateCookPlatformSelect();
             cookMatch = matchCookStats(reportMaterials);
         },
