@@ -849,6 +849,10 @@ namespace Material
 			BuildInstanceTree,
 			/** Fills report rows within a per-tick time budget. */
 			ProcessMaterials,
+			/** Loads the current master's users for Vertex Factory Users within a per-tick time budget. */
+			ResolveUsers,
+			/** Reads the current master's instances for Shader Permutations within a per-tick time budget. */
+			ReadPermutations,
 			/** Unloads the packages loaded by the finished batch. */
 			UnloadPackages
 		};
@@ -876,6 +880,8 @@ namespace Material
 			InstancePackages.Reset();
 			UserByPackage.Reset();
 			UsesByUserPath.Reset();
+			UserResolve = FUserResolveState();
+			PermutationRead = FPermutationReadState();
 			NextAssetIndex = 0;
 			MaterialsInBatch = 0;
 			BatchLoadedAssetCount = 0;
@@ -1216,82 +1222,119 @@ namespace Material
 		}
 
 		/**
-		 * Loads a master and its counted instances to read their static permutations on the editor's shader platform.
-		 * Instances that override static parameters or base properties compile their own shader map. Instances whose
-		 * shader map key matches the master's or another instance's compile the same shaders, so the layout shader
-		 * count is taken once per unique permutation, repeated for each of that instance's quality shader maps.
-		 * Output: Fills Item.PermutationParameters, InstancePermutationRows, StaticPermutationInstancePaths and
-		 * LayoutShaderCount, and sets Item.bShaderPermutationsRead.
+		 * Progress of reading one master's static permutations. Its instances are read over several ticks, because
+		 * loading an instance whose shaders are not cached starts compiling them, which can take seconds each.
+		 */
+		struct FPermutationReadState
+		{
+			/** Index in AssetItems of the master being read, or INDEX_NONE when no master is being read. */
+			int32 ItemIndex = INDEX_NONE;
+			/** The loaded master. */
+			TWeakObjectPtr<UMaterial> MasterMaterial;
+			/** Shader platform the layout shader counts are for. */
+			EShaderPlatform ShaderPlatform = SP_NumPlatforms;
+			/** The cooked game for the editor's own OS, so editor-only shaders are left out of the layout. */
+			const ITargetPlatform* CookedPlatform = nullptr;
+			/** Shader map key of the master. */
+			FStaticPermutationKey MasterKey;
+			/** Keys of the instances counted so far that compile their own, unique shader map. */
+			TArray<FStaticPermutationKey> PermutationKeys;
+			/** Index in the master's Instances of the next instance to read. */
+			int32 NextInstanceIndex = 0;
+			/** Layout shaders counted so far for the master and its unique permutations. */
+			int32 LayoutShaderCount = 0;
+		};
+
+		/**
+		 * Loads the master of Item to start reading its static permutations on the editor's shader platform: counts
+		 * the master's layout shaders and lists its static parameters and base properties.
+		 * Output: On success, OutState is ready for ReadInstancePermutation with ItemIndex as the master's report row.
+		 * OutState.ItemIndex stays INDEX_NONE when the master cannot be loaded.
 		 * Returns: The number of materials loaded from disk.
 		 */
-		static int32 ReadStaticPermutations(const FAssetData& MasterData, FMaterialAssetData& Item)
+		static int32 BeginStaticPermutations(const FAssetData& MasterData, FMaterialAssetData& Item, const int32 ItemIndex, FPermutationReadState& OutState)
 		{
-			int32 LoadedAssetCount = 0;
+			OutState = FPermutationReadState();
 			const bool bWasMasterLoaded = MasterData.IsAssetLoaded();
 			UMaterial* MasterMaterial = Cast<UMaterial>(MasterData.GetAsset());
 			if (MasterMaterial == nullptr)
 			{
 				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material %s to read its static permutations."), *MasterData.GetObjectPathString());
-				return LoadedAssetCount;
+				return 0;
 			}
-			if (!bWasMasterLoaded) ++LoadedAssetCount;
 
-			const EShaderPlatform ShaderPlatform = GMaxRHIShaderPlatform;
-			// The cooked game for the editor's own OS, such as Windows, so editor-only shaders are left out of the layout.
-			const ITargetPlatform* CookedPlatform = GetTargetPlatformManagerRef().FindTargetPlatform(FPlatformProperties::IniPlatformName());
-			int32 LayoutShaderCount = CountLayoutShaders(*MasterMaterial, ShaderPlatform, CookedPlatform, 1);
-
+			OutState.ItemIndex = ItemIndex;
+			OutState.MasterMaterial = MasterMaterial;
+			OutState.ShaderPlatform = GMaxRHIShaderPlatform;
+			OutState.CookedPlatform = GetTargetPlatformManagerRef().FindTargetPlatform(FPlatformProperties::IniPlatformName());
+			OutState.LayoutShaderCount = CountLayoutShaders(*MasterMaterial, OutState.ShaderPlatform, OutState.CookedPlatform, 1);
 			AddPermutationParameters(*MasterMaterial, Item);
-
 			// The master's base properties are its own, so its base property hash is 0, as for instances that change none.
-			const FStaticPermutationKey MasterKey = MakePermutationKey(*MasterMaterial, 0);
-			TArray<FStaticPermutationKey> PermutationKeys;
-			for (const FAssetData& InstanceData : Item.Instances)
+			OutState.MasterKey = MakePermutationKey(*MasterMaterial, 0);
+			return bWasMasterLoaded ? 0 : 1;
+		}
+
+		/**
+		 * Loads one counted instance and reads its static permutation. An instance that overrides static parameters
+		 * or base properties compiles its own shader map; when its shader map key matches the master's or an earlier
+		 * instance's, it shares that shader map, so layout shaders are only counted once per unique permutation,
+		 * repeated for each of the instance's quality shader maps.
+		 * Output: Adds the instance's row and, for a static permutation instance, its path and layout shaders.
+		 * Returns: 1 when this call loaded the instance from disk, otherwise 0.
+		 */
+		static int32 ReadInstancePermutation(const UMaterial& MasterMaterial, const FAssetData& InstanceData, FMaterialAssetData& Item, FPermutationReadState& State)
+		{
+			const bool bWasAssetLoaded = InstanceData.IsAssetLoaded();
+			UMaterialInstance* Instance = Cast<UMaterialInstance>(InstanceData.GetAsset());
+			if (Instance == nullptr)
 			{
-				const bool bWasAssetLoaded = InstanceData.IsAssetLoaded();
-				UMaterialInstance* Instance = Cast<UMaterialInstance>(InstanceData.GetAsset());
-				if (Instance == nullptr)
-				{
-					UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material instance %s to read its static permutation."), *InstanceData.GetObjectPathString());
-					continue;
-				}
-				if (!bWasAssetLoaded) ++LoadedAssetCount;
-
-				FStaticPermutationKey Key = MakePermutationKey(*Instance, GetBasePropertyOverridesHash(*Instance));
-				FInstancePermutationRow& Row = Item.InstancePermutationRows.AddDefaulted_GetRef();
-				Row.Path = InstanceData.GetObjectPathString();
-				if (Instance->Parent != nullptr) ReadInstancePermutationCells(*MasterMaterial, *Instance, Key, Item, Row);
-
-				if (!Instance->bHasStaticPermutationResource) continue;
-
-				Item.StaticPermutationInstancePaths.Add(InstanceData.GetObjectPathString());
-				// Instances whose key matches the master's or an earlier instance's share that shader map.
-				const bool bAlreadySeen = MasterKey.CompilesSameShaders(Key) ||
-					PermutationKeys.ContainsByPredicate([&Key](const FStaticPermutationKey& SeenKey)
-					{
-						return SeenKey.CompilesSameShaders(Key);
-					});
-				if (bAlreadySeen) continue;
-
-				PermutationKeys.Add(MoveTemp(Key));
-				// The layout only covers the instance's active quality level, so it is repeated for each quality shader map.
-				// GetShaderTypes asserts that static permutation instances are constant instances.
-				if (Instance->IsA<UMaterialInstanceConstant>())
-				{
-					const int32 InstanceShaderMapCount = CountQualityShaderMaps(*Instance, ShaderPlatform);
-					LayoutShaderCount += CountLayoutShaders(*Instance, ShaderPlatform, CookedPlatform, InstanceShaderMapCount);
-				}
+				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics could not load material instance %s to read its static permutation."), *InstanceData.GetObjectPathString());
+				return 0;
 			}
+			const int32 LoadedAssetCount = bWasAssetLoaded ? 0 : 1;
 
+			FStaticPermutationKey Key = MakePermutationKey(*Instance, GetBasePropertyOverridesHash(*Instance));
+			FInstancePermutationRow& Row = Item.InstancePermutationRows.AddDefaulted_GetRef();
+			Row.Path = InstanceData.GetObjectPathString();
+			if (Instance->Parent != nullptr) ReadInstancePermutationCells(MasterMaterial, *Instance, Key, Item, Row);
+
+			if (!Instance->bHasStaticPermutationResource) return LoadedAssetCount;
+
+			Item.StaticPermutationInstancePaths.Add(InstanceData.GetObjectPathString());
+			// Instances whose key matches the master's or an earlier instance's share that shader map.
+			const bool bAlreadySeen = State.MasterKey.CompilesSameShaders(Key) ||
+				State.PermutationKeys.ContainsByPredicate([&Key](const FStaticPermutationKey& SeenKey)
+				{
+					return SeenKey.CompilesSameShaders(Key);
+				});
+			if (bAlreadySeen) return LoadedAssetCount;
+
+			State.PermutationKeys.Add(MoveTemp(Key));
+			// The layout only covers the instance's active quality level, so it is repeated for each quality shader map.
+			// GetShaderTypes asserts that static permutation instances are constant instances.
+			if (Instance->IsA<UMaterialInstanceConstant>())
+			{
+				const int32 InstanceShaderMapCount = CountQualityShaderMaps(*Instance, State.ShaderPlatform);
+				State.LayoutShaderCount += CountLayoutShaders(*Instance, State.ShaderPlatform, State.CookedPlatform, InstanceShaderMapCount);
+			}
+			return LoadedAssetCount;
+		}
+
+		/**
+		 * Stores the finished static permutation results of Item.
+		 * Output: Sorts Item's instance rows and permutation paths, fills LayoutShaderCount, and sets
+		 * Item.bShaderPermutationsRead. Resets State so no master is being read.
+		 */
+		static void FinishStaticPermutations(FMaterialAssetData& Item, FPermutationReadState& State)
+		{
 			Item.InstancePermutationRows.Sort([](const FInstancePermutationRow& Left, const FInstancePermutationRow& Right)
 			{
 				return Left.Path < Right.Path;
 			});
-
 			Item.StaticPermutationInstancePaths.Sort();
-			Item.LayoutShaderCount = LayoutShaderCount;
+			Item.LayoutShaderCount = State.LayoutShaderCount;
 			Item.bShaderPermutationsRead = true;
-			return LoadedAssetCount;
+			State = FPermutationReadState();
 		}
 
 		/**
@@ -1347,23 +1390,42 @@ namespace Material
 			return UsesByUserPath.Add(UserPath, MoveTemp(Uses));
 		}
 
-		/**
-		 * Reads the Blueprint, Cascade particle system and skeletal mesh users of a material and files each one
-		 * under the usage flags it needs. Blueprints and particle systems are loaded; skeletal meshes are read
-		 * without loading when possible (see GetUserUses). Blueprints and particle systems whose uses of this material are all
-		 * recognised are removed from their broad group; skeletal meshes stay under SkeletalMesh.
-		 * Input: MaterialAndInstances is the master and its counted instances.
-		 * Returns: The number of users loaded from disk.
-		 */
-		int32 ResolveUsersByLoading(FMaterialAssetData& Item, const TArray<FAssetData>& MaterialAndInstances)
+		/** A Blueprint, Cascade particle system or skeletal mesh user to read for Vertex Factory Users. */
+		struct FUserToResolve
 		{
-			TSet<FSoftObjectPath> TreeMaterials;
-			for (const FAssetData& MaterialOrInstance : MaterialAndInstances)
-			{
-				TreeMaterials.Add(MaterialOrInstance.GetSoftObjectPath());
-			}
+			/** Registry user type the user is listed under. */
+			EMaterialUserType Type = EMaterialUserType::Other;
+			/** Object path of the user. */
+			FString Path;
+		};
 
-			int32 LoadedAssetCount = 0;
+		/**
+		 * Progress of resolving one master's users by loading them. Users are read over several ticks, because
+		 * loading a Blueprint can pull in many other assets and take seconds.
+		 */
+		struct FUserResolveState
+		{
+			/** Index in AssetItems of the master whose users are read, or INDEX_NONE when none is being read. */
+			int32 ItemIndex = INDEX_NONE;
+			/** The master and its counted instances, so only uses of these materials are counted. */
+			TSet<FSoftObjectPath> TreeMaterials;
+			/** Users to read, in order. */
+			TArray<FUserToResolve> Users;
+			/** Index in Users of the next user to read. */
+			int32 NextUserIndex = 0;
+			/** Blueprint and particle system users whose uses of the master were all recognised. */
+			TArray<FUserToResolve> FullyResolvedUsers;
+		};
+
+		/**
+		 * Starts resolving the Blueprint, Cascade particle system and skeletal mesh users of Item, which ResolveUser
+		 * then reads one at a time.
+		 * Input: MaterialAndInstances is the master and its counted instances.
+		 * Output: Sets UserResolve for Item, or leaves it unset when Item has no such users.
+		 */
+		void BeginResolvingUsers(FMaterialAssetData& Item, const int32 ItemIndex, const TArray<FAssetData>& MaterialAndInstances)
+		{
+			UserResolve = FUserResolveState();
 			Item.ResolvedUserPathsByUsage.SetNum(MATUSAGE_MAX);
 			const EMaterialUserType ResolvableTypes[] =
 			{
@@ -1373,41 +1435,76 @@ namespace Material
 			};
 			for (const EMaterialUserType UserType : ResolvableTypes)
 			{
-				TArray<FString>& UserPaths = Item.UserPathsByType[static_cast<int32>(UserType)];
-				for (int32 UserIndex = UserPaths.Num() - 1; UserIndex >= 0; --UserIndex)
+				for (const FString& UserPath : Item.UserPathsByType[static_cast<int32>(UserType)])
 				{
-					const FString UserPath = UserPaths[UserIndex];
-					TSet<EMaterialUsage> NeededUsages;
-					bool bHasUnrecognisedUse = false;
-					for (const FMaterialUse& Use : GetUserUses(UserPath, LoadedAssetCount))
-					{
-						const bool bUsesThisMaterial = Use.Materials.Num() == 0 ||
-							Use.Materials.ContainsByPredicate([&TreeMaterials](const FSoftObjectPath& Material)
-							{
-								return TreeMaterials.Contains(Material);
-							});
-						if (!bUsesThisMaterial) continue;
-						if (Use.Usage == MATUSAGE_MAX) bHasUnrecognisedUse = true;
-						else NeededUsages.Add(Use.Usage);
-					}
-
-					for (const EMaterialUsage Usage : NeededUsages)
-					{
-						Item.ResolvedUserPathsByUsage[Usage].AddUnique(UserPath);
-					}
-					const bool bFullyResolved = NeededUsages.Num() > 0 && !bHasUnrecognisedUse;
-					if (UserType != EMaterialUserType::SkeletalMesh && bFullyResolved) UserPaths.RemoveAt(UserIndex);
+					UserResolve.Users.Add({ UserType, UserPath });
 				}
+			}
+			if (UserResolve.Users.Num() == 0) return;
+
+			UserResolve.ItemIndex = ItemIndex;
+			for (const FAssetData& MaterialOrInstance : MaterialAndInstances)
+			{
+				UserResolve.TreeMaterials.Add(MaterialOrInstance.GetSoftObjectPath());
+			}
+		}
+
+		/**
+		 * Reads one user of the master in UserResolve and files it under the usage flags it needs. Blueprints and
+		 * particle systems are loaded; skeletal meshes are read without loading when possible (see GetUserUses).
+		 * Output: Adds the user to Item's resolved users, and to UserResolve.FullyResolvedUsers when it is a
+		 * Blueprint or particle system whose uses of the master are all recognised.
+		 * Returns: The number of users loaded from disk.
+		 */
+		int32 ResolveUser(const FUserToResolve& User, FMaterialAssetData& Item)
+		{
+			int32 LoadedAssetCount = 0;
+			TSet<EMaterialUsage> NeededUsages;
+			bool bHasUnrecognisedUse = false;
+			for (const FMaterialUse& Use : GetUserUses(User.Path, LoadedAssetCount))
+			{
+				const TSet<FSoftObjectPath>& TreeMaterials = UserResolve.TreeMaterials;
+				const bool bUsesThisMaterial = Use.Materials.Num() == 0 ||
+					Use.Materials.ContainsByPredicate([&TreeMaterials](const FSoftObjectPath& Material)
+					{
+						return TreeMaterials.Contains(Material);
+					});
+				if (!bUsesThisMaterial) continue;
+				if (Use.Usage == MATUSAGE_MAX) bHasUnrecognisedUse = true;
+				else NeededUsages.Add(Use.Usage);
+			}
+
+			for (const EMaterialUsage Usage : NeededUsages)
+			{
+				Item.ResolvedUserPathsByUsage[Usage].AddUnique(User.Path);
+			}
+			const bool bFullyResolved = NeededUsages.Num() > 0 && !bHasUnrecognisedUse;
+			if (User.Type != EMaterialUserType::SkeletalMesh && bFullyResolved) UserResolve.FullyResolvedUsers.Add(User);
+			return LoadedAssetCount;
+		}
+
+		/**
+		 * Stores the resolved users of the master in UserResolve: Blueprints and particle systems whose uses were
+		 * all recognised are removed from their broad group; skeletal meshes stay under SkeletalMesh.
+		 * Output: Sorts Item's resolved user lists and resets UserResolve.
+		 */
+		void FinishResolvingUsers(FMaterialAssetData& Item)
+		{
+			for (const FUserToResolve& User : UserResolve.FullyResolvedUsers)
+			{
+				Item.UserPathsByType[static_cast<int32>(User.Type)].Remove(User.Path);
 			}
 			for (TArray<FString>& ResolvedUserPaths : Item.ResolvedUserPathsByUsage)
 			{
 				ResolvedUserPaths.Sort();
 			}
-			return LoadedAssetCount;
+			UserResolve = FUserResolveState();
 		}
 
 		/**
-		 * Fills the report row of one master material, loading it or its users when the settings ask for it.
+		 * Fills the report row of one master material, loading it when the settings ask for it. Users and instances
+		 * that need loading are read on later ticks: with Vertex Factory Users on, UserResolve is set for the
+		 * ResolveUsers step; with Shader Permutations on, PermutationRead is set for the ReadPermutations step.
 		 * Returns: The number of assets this call loaded from disk.
 		 */
 		int32 ProcessMaterial(IAssetRegistry& AssetRegistry, const UAssetAnalyticsSettings& Settings, const FAssetData& AssetData)
@@ -1416,6 +1513,7 @@ namespace Material
 				!Core::HasRelevantReferencer(AssetRegistry, AssetData, Settings.bIgnoreDeveloperReferences)) return 0;
 
 			int32 LoadedAssetCount = 0;
+			const int32 ItemIndex = AssetItems.Num();
 			FMaterialAssetData& Item = AssetItems.Emplace_GetRef(AssetData);
 			if (Settings.bMaterialPackageDiskSize)
 			{
@@ -1434,12 +1532,154 @@ namespace Material
 					TArray<FAssetData> MaterialAndInstances = Item.Instances;
 					MaterialAndInstances.Add(AssetData);
 					GatherUsersByType(AssetRegistry, MaterialAndInstances, Settings, Item);
-					if (Settings.bMaterialResolveUsersByLoading) LoadedAssetCount += ResolveUsersByLoading(Item, MaterialAndInstances);
+					if (Settings.bMaterialResolveUsersByLoading) BeginResolvingUsers(Item, ItemIndex, MaterialAndInstances);
 				}
 			}
 			if (Settings.bMaterialUsageFlags && ReadUsageFlags(AssetData, Item)) ++LoadedAssetCount;
-			if (Settings.bMaterialShaderPermutations) LoadedAssetCount += ReadStaticPermutations(AssetData, Item);
+			if (Settings.bMaterialShaderPermutations) LoadedAssetCount += BeginStaticPermutations(AssetData, Item, ItemIndex, PermutationRead);
 			return LoadedAssetCount;
+		}
+
+		/**
+		 * Ends the batch when it is full or no materials are left: when it loaded assets, the next tick unloads them.
+		 * Returns: True when the unload step was started; false when the report keeps processing materials.
+		 */
+		bool TryFinishBatch(const UAssetAnalyticsSettings& Settings)
+		{
+			const int32 MaterialsPerBatch = FMath::Max(Settings.AssetsPerTick, 1);
+			const bool bBatchFinished = MaterialsInBatch >= MaterialsPerBatch || NextAssetIndex >= PendingAssets.Num();
+			if (!bBatchFinished) return false;
+			if (BatchLoadedAssetCount == 0)
+			{
+				MaterialsInBatch = 0;
+				return false;
+			}
+
+			// Unloading can wait on shader compiles, so it gets its own tick and message.
+			PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
+			Step = ERunnerStep::UnloadPackages;
+			ProgressNotification.SetText(FText::Format(
+				LOCTEXT("UnloadingMaterialPackages", "Material Analytics - {0} / {1}\nUnloading {2} packages..."),
+				FText::AsNumber(NextAssetIndex),
+				FText::AsNumber(PendingAssets.Num()),
+				FText::AsNumber(PackageUnloader.GetTrackedPackageCount())));
+			return true;
+		}
+
+		/** Tells the user which master's instances are being read and how far along it is. */
+		void UpdatePermutationNotification() const
+		{
+			const FMaterialAssetData& Item = AssetItems[PermutationRead.ItemIndex];
+			ProgressNotification.SetText(FText::Format(
+				LOCTEXT("ReadingStaticPermutations", "Material Analytics - {0} / {1}\nReading static permutations of {2}: instance {3} / {4}\nInstances with uncached shaders start compiling when they load."),
+				FText::AsNumber(NextAssetIndex),
+				FText::AsNumber(PendingAssets.Num()),
+				FText::FromName(Item.AssetData.AssetName),
+				FText::AsNumber(PermutationRead.NextInstanceIndex),
+				FText::AsNumber(Item.Instances.Num())));
+		}
+
+		/**
+		 * Reads the current master's instances until the tick time budget is used, at least one per tick, so the
+		 * editor keeps repainting and Cancel keeps working while instances load.
+		 * Once all are read, stores the results and ends the batch or goes back to processing materials.
+		 * Returns: True, since the report is still running.
+		 */
+		bool ReadPermutationsForOneTick(const UAssetAnalyticsSettings& Settings)
+		{
+			const double TickStartSeconds = FPlatformTime::Seconds();
+			FMaterialAssetData& Item = AssetItems[PermutationRead.ItemIndex];
+			const UMaterial* MasterMaterial = PermutationRead.MasterMaterial.Get();
+			while (MasterMaterial != nullptr && PermutationRead.NextInstanceIndex < Item.Instances.Num())
+			{
+				const FAssetData& InstanceData = Item.Instances[PermutationRead.NextInstanceIndex];
+				BatchLoadedAssetCount += ReadInstancePermutation(*MasterMaterial, InstanceData, Item, PermutationRead);
+				++PermutationRead.NextInstanceIndex;
+				if (FPlatformTime::Seconds() - TickStartSeconds >= TickTimeBudgetSeconds) break;
+			}
+			if (MasterMaterial != nullptr && PermutationRead.NextInstanceIndex < Item.Instances.Num())
+			{
+				if (FPlatformTime::Seconds() - MaterialStepStartSeconds >= SlowStepMessageDelaySeconds) UpdatePermutationNotification();
+				return true;
+			}
+
+			if (MasterMaterial == nullptr)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("Asset Analytics stopped reading the static permutations of %s because it was unloaded."), *Item.AssetData.GetObjectPathString());
+			}
+			FinishStaticPermutations(Item, PermutationRead);
+			if (StartNextMaterialStep(Settings)) return true;
+			// The next ProcessMaterials tick completes the report when this was the last material.
+			UpdateProgressNotification();
+			return true;
+		}
+
+		/** Tells the user which master's users are being loaded and how far along it is. */
+		void UpdateUserResolveNotification() const
+		{
+			const FMaterialAssetData& Item = AssetItems[UserResolve.ItemIndex];
+			ProgressNotification.SetText(FText::Format(
+				LOCTEXT("ResolvingMaterialUsers", "Material Analytics - {0} / {1}\nLoading users of {2}: {3} / {4}"),
+				FText::AsNumber(NextAssetIndex),
+				FText::AsNumber(PendingAssets.Num()),
+				FText::FromName(Item.AssetData.AssetName),
+				FText::AsNumber(UserResolve.NextUserIndex),
+				FText::AsNumber(UserResolve.Users.Num())));
+		}
+
+		/**
+		 * Reads the current master's users until the tick time budget is used, at least one per tick, so the editor
+		 * keeps repainting and Cancel keeps working while Blueprints and particle systems load.
+		 * Once all are read, stores the results and moves to the master's next step.
+		 * Returns: True, since the report is still running.
+		 */
+		bool ResolveUsersForOneTick(const UAssetAnalyticsSettings& Settings)
+		{
+			const double TickStartSeconds = FPlatformTime::Seconds();
+			FMaterialAssetData& Item = AssetItems[UserResolve.ItemIndex];
+			while (UserResolve.NextUserIndex < UserResolve.Users.Num())
+			{
+				BatchLoadedAssetCount += ResolveUser(UserResolve.Users[UserResolve.NextUserIndex], Item);
+				++UserResolve.NextUserIndex;
+				if (FPlatformTime::Seconds() - TickStartSeconds >= TickTimeBudgetSeconds) break;
+			}
+			if (UserResolve.NextUserIndex < UserResolve.Users.Num())
+			{
+				if (FPlatformTime::Seconds() - MaterialStepStartSeconds >= SlowStepMessageDelaySeconds) UpdateUserResolveNotification();
+				return true;
+			}
+
+			FinishResolvingUsers(Item);
+			if (StartNextMaterialStep(Settings)) return true;
+			// The next ProcessMaterials tick completes the report when this was the last material.
+			UpdateProgressNotification();
+			return true;
+		}
+
+		/**
+		 * Moves on once a master's row, or one of its loading steps, is done: its users are loaded first, then its
+		 * instances are read, then the batch ends or the report goes back to processing materials.
+		 * Returns: True when the next tick runs another step; false when materials can keep being processed.
+		 */
+		bool StartNextMaterialStep(const UAssetAnalyticsSettings& Settings)
+		{
+			// The step's own message only replaces the progress text once the step is slow; see SlowStepMessageDelaySeconds.
+			if (UserResolve.ItemIndex != INDEX_NONE)
+			{
+				Step = ERunnerStep::ResolveUsers;
+				MaterialStepStartSeconds = FPlatformTime::Seconds();
+				UpdateProgressNotification();
+				return true;
+			}
+			if (PermutationRead.ItemIndex != INDEX_NONE)
+			{
+				Step = ERunnerStep::ReadPermutations;
+				MaterialStepStartSeconds = FPlatformTime::Seconds();
+				UpdateProgressNotification();
+				return true;
+			}
+			Step = ERunnerStep::ProcessMaterials;
+			return TryFinishBatch(Settings);
 		}
 
 		/**
@@ -1451,7 +1691,6 @@ namespace Material
 		{
 			const double TickStartSeconds = FPlatformTime::Seconds();
 			const bool bLoadsAssets = NeedsAssetLoading(Settings);
-			const int32 MaterialsPerBatch = FMath::Max(Settings.AssetsPerTick, 1);
 			while (NextAssetIndex < PendingAssets.Num())
 			{
 				// Snapshot loaded packages so everything this batch loads, including dependencies, can be unloaded afterwards.
@@ -1468,23 +1707,8 @@ namespace Material
 				++NextAssetIndex;
 				++MaterialsInBatch;
 
-				const bool bBatchFinished = MaterialsInBatch >= MaterialsPerBatch || NextAssetIndex >= PendingAssets.Num();
-				if (bBatchFinished)
-				{
-					if (BatchLoadedAssetCount > 0)
-					{
-						// Unloading can wait on shader compiles, so it gets its own tick and message.
-						PackageUnloader.TrackPackagesLoadedSince(PackagesBeforeBatch);
-						Step = ERunnerStep::UnloadPackages;
-						ProgressNotification.SetText(FText::Format(
-							LOCTEXT("UnloadingMaterialPackages", "Material Analytics - {0} / {1}\nUnloading {2} packages..."),
-							FText::AsNumber(NextAssetIndex),
-							FText::AsNumber(PendingAssets.Num()),
-							FText::AsNumber(PackageUnloader.GetTrackedPackageCount())));
-						return true;
-					}
-					MaterialsInBatch = 0;
-				}
+				// The master's users and instances are loaded on the following ticks; the batch ends after them.
+				if (StartNextMaterialStep(Settings)) return true;
 				if (FPlatformTime::Seconds() - TickStartSeconds >= TickTimeBudgetSeconds) break;
 			}
 
@@ -1555,6 +1779,12 @@ namespace Material
 
 			case ERunnerStep::ProcessMaterials:
 				return ProcessMaterialsForOneTick(AssetRegistry, *Settings);
+
+			case ERunnerStep::ResolveUsers:
+				return ResolveUsersForOneTick(*Settings);
+
+			case ERunnerStep::ReadPermutations:
+				return ReadPermutationsForOneTick(*Settings);
 
 			case ERunnerStep::UnloadPackages:
 				PackageUnloader.UnloadReportPackages();
@@ -1827,6 +2057,11 @@ namespace Material
 		static constexpr double NotificationDisplayDelaySeconds = 0.2;
 		/** Longest time one tick spends processing materials before letting the editor repaint. */
 		static constexpr double TickTimeBudgetSeconds = 0.05;
+		/**
+		 * How long a master's user or instance step runs before the notification switches to that step's message.
+		 * Quick steps keep the normal progress text, so the message does not flicker too fast to read.
+		 */
+		static constexpr double SlowStepMessageDelaySeconds = 1.0;
 		/** Report rows gathered so far, one per processed master material. */
 		TArray<FMaterialAssetData> AssetItems;
 		/** Master materials found in the configured folders, processed in order. */
@@ -1861,6 +2096,12 @@ namespace Material
 		TSet<UPackage*> PackagesBeforeBatch;
 		/** Name of the last material processed, shown in the notification. */
 		FString CurrentAssetName;
+		/** When the current master's user or instance step started, to tell whether it is slow. */
+		double MaterialStepStartSeconds = 0.0;
+		/** Users of the master whose users are being loaded, while Step is ResolveUsers. */
+		FUserResolveState UserResolve;
+		/** Static permutations of the master whose instances are being read, while Step is ReadPermutations. */
+		FPermutationReadState PermutationRead;
 	};
 
 	static TUniquePtr<FMaterialAnalyticsRunner> MaterialAnalyticsRunner;
