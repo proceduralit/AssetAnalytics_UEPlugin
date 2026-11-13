@@ -43,12 +43,14 @@ void FAssetAnalyticsModule::ShutdownModule()
 	}
 }
 
-/** Adds the Mesh and Material Analytics actions to the editor Tools > Audit submenu. */
+/** Adds the Mesh and Material Analytics actions to an Asset Analytics section of the editor Window menu (4.27 has no Tools menu). */
 void FAssetAnalyticsModule::RegisterMenus()
 {
 	FToolMenuOwnerScoped OwnerScoped(this);
-	UToolMenu* AuditMenu = UToolMenus::Get()->ExtendMenu("LevelEditor.MainMenu.Tools.Audit");
-	FToolMenuSection& Section = AuditMenu->FindOrAddSection("Audit");
+	UToolMenu* WindowMenu = UToolMenus::Get()->ExtendMenu("MainFrame.MainMenu.Window");
+	FToolMenuSection& Section = WindowMenu->AddSection(
+		"AssetAnalytics",
+		LOCTEXT("AssetAnalyticsMenuSection", "Asset Analytics"));
 	Section.AddEntry(FToolMenuEntry::InitMenuEntry(
 		"GenerateMeshAnalyticsReport",
 		LOCTEXT("GenerateMeshAnalyticsReport", "Generate Mesh Analytics Report"),

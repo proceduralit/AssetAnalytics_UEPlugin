@@ -5,6 +5,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
+#include "Engine/EngineTypes.h"
 #include "AssetAnalyticsSettings.generated.h"
 
 /** Editor settings used by the Asset Analytics reports. */
@@ -69,10 +70,6 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns")
 	bool bTriangleCount = true;
 
-	/** Includes Nanite status, input triangle count, and static-mesh fallback percentage. */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Nanite Info"))
-	bool bNaniteInfo = true;
-
 	/** Includes the material slot count and the materials the mesh references. */
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Material Count (Loads Skeletal Meshes)"))
 	bool bMaterialCount = true;
@@ -85,8 +82,8 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Max Bounds Length (Loads Skeletal Meshes)"))
 	bool bMaxBoundsLength = true;
 
-	/** Includes the estimated physics resource size; the report page shows it in megabytes. */
-	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Physics Size (Loads Meshes Missing Registry Data)"))
+	/** Includes the estimated physics resource size; the report page shows it in megabytes. UE 4.27 saves no registry data for it, so meshes are loaded. */
+	UPROPERTY(config, EditAnywhere, Category = "Mesh Analytics|Columns", meta = (DisplayName = "Physics Size (Loads Meshes)"))
 	bool bPhysicsSize = false;
 
 	/** Includes the complex collision vertex count in the Mesh Analytics report. */
@@ -134,8 +131,8 @@ public:
 
 	/**
 	 * Loads Blueprint and Cascade particle system users to find the exact usage they need (spline mesh, instanced
-	 * static mesh, particle sprites, ...). Skeletal mesh users are checked for morph targets, cloth and mesh
-	 * deformers without loading them, from Asset Registry data and their package headers. Niagara systems, level
+	 * static mesh, particle sprites, ...). Skeletal mesh users are checked for morph targets and cloth
+	 * without loading them, from Asset Registry data and their package headers. Niagara systems, level
 	 * actors and static mesh placements are not resolved. Users are unloaded again after each batch.
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Material Analytics|Columns", meta = (DisplayName = "Vertex Factory Users (Loads User Assets)"))
