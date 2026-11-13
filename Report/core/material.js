@@ -40,7 +40,10 @@
         { key: "ShaderCount", label: "Shader Count", type: "number", axis: true, filter: true,
             value: material => cookedByMaterial.get(material)?.shaders ?? material.ShaderCount },
         { key: "ShaderCountSource", label: "Shader Count Source", type: "string", filter: true,
-            value: material => cookStats ? shaderCountSource(material) : undefined },        { key: "TotalUsers", label: "Total Users", type: "number", axis: true, filter: true,
+            value: material => cookStats ? shaderCountSource(material) : undefined },
+        // Materials whose users the report could not list are plotted as Unknown at -1 rather than left out,
+        // since they may be used a lot by levels, widgets or other assets the report does not check.
+        { key: "TotalUsers", label: "Total Users", type: "number", axis: true, filter: true, unknownPlotValue: -1,
             value: material => hasUsers(material) ? countUsers(material) : undefined },
         { key: "EnabledUsageFlags", label: "Enabled Usage Flags", type: "number", axis: true,
             value: material => material.UsageFlagsRead ? summarizeUsage(material).enabledCount : undefined },
@@ -467,7 +470,9 @@
         });
         const note = document.createElement("p");
         note.className = "path-text";
-        note.textContent = "Only parameters that some instance overrides are shown.";
+        note.textContent = "Only parameters that some instance overrides are shown. Under each parameter name, " +
+            `${instanceCellStates.SameAsParent.marker} counts overrides with the parent's value and ` +
+            `${instanceCellStates.Changed.marker} counts overrides with a different value.`;
         legend.append(note);
         return legend;
     }
@@ -511,10 +516,25 @@
         headRow.append(corner);
         columns.forEach(({ parameter }) => {
             const cell = document.createElement("th");
-            cell.textContent = parameter.Name ?? "";
+            const name = document.createElement("div");
+            name.textContent = parameter.Name ?? "";
             const kind = permutationParameterKinds[parameter.Kind] ?? parameter.Kind ?? "";
             const changedCount = (parameter.ChangedCount ?? 0).toLocaleString();
             const noOpCount = (parameter.NoOpCount ?? 0).toLocaleString();
+
+            // Override counts under the name, in the colours of their cells, so long grids can be read at a glance.
+            const counts = document.createElement("div");
+            counts.className = "grid-override-counts";
+            [
+                ["same-as-parent", instanceCellStates.SameAsParent.marker, parameter.NoOpCount ?? 0, noOpCount],
+                ["changed", instanceCellStates.Changed.marker, parameter.ChangedCount ?? 0, changedCount]
+            ].forEach(([className, marker, count, countText]) => {
+                const badge = document.createElement("span");
+                badge.className = count > 0 ? `grid-count ${className}` : "grid-count none";
+                badge.textContent = `${marker} ${countText}`;
+                counts.append(badge);
+            });
+            cell.append(name, counts);
             cell.title = [
                 parameter.Default !== undefined ? `${kind}, master's value ${parameter.Default}` : kind,
                 `Overrides that differ from the parent: ${changedCount}`,
