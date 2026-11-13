@@ -15,7 +15,8 @@ switches to the report type of the JSON you load.
    A material whose users the report could not list is plotted as a hollow
    grey point on the dotted Unknown line next to 0 Total Users. It may still
    be used by levels, widgets or other assets the report does not check.
-   Total Users filters do not match these materials.
+   Total Users filters do not match these materials; filter Users Known by
+   No to show only them, or by Yes to hide them.
    Assets with no value for another axis are listed below the graph when
    nothing is selected; click one to show its details.
 5. Use Box Zoom in the graph toolbar to draw one zoom rectangle. The graph then
