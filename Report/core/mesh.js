@@ -99,9 +99,52 @@
                 "The mesh references no materials.");
         }
         if (Array.isArray(mesh.Textures)) {
-            ui.appendPathSection(panel, "Textures used by its materials", mesh.Textures, "texture",
-                "Its materials use no textures.");
+            if (Array.isArray(mesh.TextureSizes) && mesh.TextureSizes.length === mesh.Textures.length &&
+                mesh.Textures.length > 0) {
+                panel.append(createTextureSection(mesh, ui));
+            } else {
+                // Reports written before texture sizes were added show the paths only.
+                ui.appendPathSection(panel, "Textures used by its materials", mesh.Textures, "texture",
+                    "Its materials use no textures.");
+            }
         }
+    }
+
+    // Returns the heading and an open table of the textures the mesh's materials use, each with its resolution.
+    function createTextureSection(mesh, ui) {
+        const fragment = document.createDocumentFragment();
+        const heading = document.createElement("h3");
+        heading.textContent = "Textures used by its materials";
+
+        const list = document.createElement("details");
+        list.className = "path-list";
+        list.open = true;
+        const summary = document.createElement("summary");
+        const count = mesh.Textures.length;
+        summary.textContent = `${count.toLocaleString()} ${count === 1 ? "texture" : "textures"}`;
+
+        const table = document.createElement("table");
+        table.className = "details-table";
+        const headRow = table.createTHead().insertRow();
+        ["Texture", "Resolution"].forEach(text => {
+            const header = document.createElement("th");
+            header.textContent = text;
+            headRow.append(header);
+        });
+        const body = table.createTBody();
+        mesh.Textures.forEach((path, index) => {
+            const row = body.insertRow();
+            row.insertCell().append(ui.createPathLink(path));
+            const [width, height] = mesh.TextureSizes[index] ?? [];
+            const sizeCell = row.insertCell();
+            sizeCell.className = "texture-size";
+            sizeCell.textContent = typeof width === "number" && typeof height === "number"
+                ? `${width.toLocaleString()} × ${height.toLocaleString()}`
+                : "Unknown";
+        });
+        list.append(summary, table);
+        fragment.append(heading, list);
+        return fragment;
     }
 
     (window.AssetAnalyticsReportTypes ??= []).push({
