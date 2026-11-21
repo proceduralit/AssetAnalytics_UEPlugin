@@ -80,6 +80,8 @@ namespace Mesh
 		TArray<FString> TexturePaths;
 		/** Width and height of each texture in TexturePaths, at the same index, as GetTextureResolution returns. */
 		TArray<FIntPoint> TextureSizes;
+		/** Whether each texture in TexturePaths, at the same index, has Virtual Texture Streaming enabled. */
+		TArray<bool> TextureVirtualFlags;
 		/** Largest width or height among those textures. */
 		int32 MaxTextureResolution = INDEX_NONE;
 		/** UV channels in LOD 0. */
@@ -157,7 +159,7 @@ namespace Mesh
 		Item.TextureCount = UniqueTextures.Num();
 		if (bCollectTextureCount)
 		{
-			// Sorted by path, with each texture's size kept at the same index as its path.
+			// Sorted by path, with each texture's size and virtual texture flag kept at the same index as its path.
 			TArray<UTexture*> SortedTextures = UniqueTextures.Array();
 			SortedTextures.Sort([](const UTexture& Left, const UTexture& Right)
 			{
@@ -167,6 +169,8 @@ namespace Mesh
 			{
 				Item.TexturePaths.Add(Texture->GetPathName());
 				Item.TextureSizes.Add(GetTextureResolution(*Texture));
+				// The texture's own setting; it only takes effect when the project enables virtual textures.
+				Item.TextureVirtualFlags.Add(Texture->VirtualTextureStreaming != 0);
 			}
 		}
 
@@ -932,6 +936,13 @@ namespace Mesh
 						Writer.WriteValue(TextureSize.X);
 						Writer.WriteValue(TextureSize.Y);
 						Writer.WriteArrayEnd();
+					}
+					Writer.WriteArrayEnd();
+					// Virtual Texture Streaming setting of each texture in Textures, at the same index.
+					Writer.WriteArrayStart(TEXT("TextureVirtual"));
+					for (const bool bVirtualTexture : Item.TextureVirtualFlags)
+					{
+						Writer.WriteValue(bVirtualTexture);
 					}
 					Writer.WriteArrayEnd();
 				}

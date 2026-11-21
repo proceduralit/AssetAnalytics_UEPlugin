@@ -110,7 +110,8 @@
         }
     }
 
-    // Returns the heading and an open table of the textures the mesh's materials use, each with its resolution.
+    // Returns the heading and an open table of the textures the mesh's materials use, each with its resolution
+    // and, for reports that include it, whether Virtual Texture Streaming is enabled.
     function createTextureSection(mesh, ui) {
         const fragment = document.createDocumentFragment();
         const heading = document.createElement("h3");
@@ -125,8 +126,10 @@
 
         const table = document.createElement("table");
         table.className = "details-table";
+        const hasVirtualFlags = Array.isArray(mesh.TextureVirtual) && mesh.TextureVirtual.length === count;
         const headRow = table.createTHead().insertRow();
-        ["Texture", "Resolution"].forEach(text => {
+        const headers = hasVirtualFlags ? ["Texture", "Resolution", "Virtual Texture"] : ["Texture", "Resolution"];
+        headers.forEach(text => {
             const header = document.createElement("th");
             header.textContent = text;
             headRow.append(header);
@@ -141,6 +144,12 @@
             sizeCell.textContent = typeof width === "number" && typeof height === "number"
                 ? `${width.toLocaleString()} × ${height.toLocaleString()}`
                 : "Unknown";
+            if (hasVirtualFlags) {
+                const virtualCell = row.insertCell();
+                virtualCell.className = "texture-virtual";
+                const isVirtual = mesh.TextureVirtual[index];
+                virtualCell.textContent = typeof isVirtual === "boolean" ? (isVirtual ? "Yes" : "No") : "Unknown";
+            }
         });
         list.append(summary, table);
         fragment.append(heading, list);
