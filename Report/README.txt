@@ -23,7 +23,8 @@ switches to the report type of the JSON you load.
    returns to pan mode automatically; Home restores the full view.
 6. Click a point to show the asset's details below the graph: for a mesh, the
    materials it references and the textures they use, with each texture's
-   resolution after Maximum Texture Size; for a material, its
+   resolution after Maximum Texture Size and whether it is a virtual
+   texture; for a material, its
    vertex factories and instances, followed by a colour-coded grid of every
    instance's base property overrides and static parameters. Under each
    parameter name, the yellow number counts instances that override it with

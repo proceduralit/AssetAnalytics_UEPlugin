@@ -494,7 +494,8 @@ h1 {
     word-break: break-all;
 }
 
-.details-table td.texture-size {
+.details-table td.texture-size,
+.details-table td.texture-virtual {
     white-space: nowrap;
 }
 
