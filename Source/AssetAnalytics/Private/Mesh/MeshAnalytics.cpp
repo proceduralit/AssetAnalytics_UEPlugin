@@ -78,6 +78,8 @@ namespace Mesh
 		int32 TextureCount = INDEX_NONE;
 		/** Object paths of those unique textures, sorted. Empty when the mesh was not loaded. */
 		TArray<FString> TexturePaths;
+		/** Width and height of each texture in TexturePaths, at the same index, as GetTextureResolution returns. */
+		TArray<FIntPoint> TextureSizes;
 		/** Largest width or height among those textures. */
 		int32 MaxTextureResolution = INDEX_NONE;
 		/** UV channels in LOD 0. */
@@ -102,6 +104,30 @@ namespace Mesh
 		case CTF_UseComplexAsSimple: return TEXT("ComplexAsSimple");
 		default: return TEXT("None");
 		}
+	}
+
+	/**
+	 * Returns the width and height of Texture: the imported size for 2D textures, otherwise the surface size. When
+	 * Maximum Texture Size is set, both sides are halved until the longer one fits, as the engine drops mips.
+	 */
+	static FIntPoint GetTextureResolution(const UTexture& Texture)
+	{
+		FIntPoint Resolution(
+			FMath::RoundToInt(Texture.GetSurfaceWidth()),
+			FMath::RoundToInt(Texture.GetSurfaceHeight()));
+		if (const UTexture2D* Texture2D = Cast<UTexture2D>(&Texture))
+		{
+			Resolution = Texture2D->GetImportedSize();
+		}
+		if (Texture.MaxTextureSize > 0)
+		{
+			while (FMath::Max(Resolution.X, Resolution.Y) > Texture.MaxTextureSize)
+			{
+				Resolution.X = FMath::Max(Resolution.X / 2, 1);
+				Resolution.Y = FMath::Max(Resolution.Y / 2, 1);
+			}
+		}
+		return Resolution;
 	}
 
 	/** Fills Item with the material and texture data enabled in Settings. */
@@ -131,28 +157,25 @@ namespace Mesh
 		Item.TextureCount = UniqueTextures.Num();
 		if (bCollectTextureCount)
 		{
-			for (const UTexture* Texture : UniqueTextures)
+			// Sorted by path, with each texture's size kept at the same index as its path.
+			TArray<UTexture*> SortedTextures = UniqueTextures.Array();
+			SortedTextures.Sort([](const UTexture& Left, const UTexture& Right)
+			{
+				return Left.GetPathName() < Right.GetPathName();
+			});
+			for (const UTexture* Texture : SortedTextures)
 			{
 				Item.TexturePaths.Add(Texture->GetPathName());
+				Item.TextureSizes.Add(GetTextureResolution(*Texture));
 			}
-			Item.TexturePaths.Sort();
 		}
 
 		if (!bCollectTextureResolution) return;
 		int32 MaxTextureResolution = 0;
 		for (const UTexture* Texture : UniqueTextures)
 		{
-			// Use the imported size for 2D textures, capped by Maximum Texture Size when set.
-			int32 TextureResolution = FMath::RoundToInt(
-				FMath::Max(Texture->GetSurfaceWidth(), Texture->GetSurfaceHeight()));
-			if (const UTexture2D* Texture2D = Cast<UTexture2D>(Texture))
-			{
-				const FIntPoint ImportedSize = Texture2D->GetImportedSize();
-				TextureResolution = FMath::Max(ImportedSize.X, ImportedSize.Y);
-			}
-			if (Texture->MaxTextureSize > 0) TextureResolution = FMath::Min(TextureResolution, Texture->MaxTextureSize);
-
-			MaxTextureResolution = FMath::Max(MaxTextureResolution, TextureResolution);
+			const FIntPoint TextureResolution = GetTextureResolution(*Texture);
+			MaxTextureResolution = FMath::Max(MaxTextureResolution, FMath::Max(TextureResolution.X, TextureResolution.Y));
 		}
 		Item.MaxTextureResolution = MaxTextureResolution;
 	}
@@ -898,7 +921,20 @@ namespace Mesh
 			if (Settings.bTextureCount)
 			{
 				WriteNumberOrNull(Writer, TEXT("UniqueTextures"), Item.TextureCount);
-				if (Item.TextureCount != INDEX_NONE) WritePathArray(Writer, TEXT("Textures"), Item.TexturePaths);
+				if (Item.TextureCount != INDEX_NONE)
+				{
+					WritePathArray(Writer, TEXT("Textures"), Item.TexturePaths);
+					// [Width, Height] of each texture in Textures, at the same index.
+					Writer.WriteArrayStart(TEXT("TextureSizes"));
+					for (const FIntPoint& TextureSize : Item.TextureSizes)
+					{
+						Writer.WriteArrayStart();
+						Writer.WriteValue(TextureSize.X);
+						Writer.WriteValue(TextureSize.Y);
+						Writer.WriteArrayEnd();
+					}
+					Writer.WriteArrayEnd();
+				}
 			}
 			if (Settings.bMaxTextureResolution) WriteNumberOrNull(Writer, TEXT("MaxTextureResolution"), Item.MaxTextureResolution);
 			if (Settings.bUVChannelCount) WriteNumberOrNull(Writer, TEXT("UVChannels"), Item.UVChannelCount);
