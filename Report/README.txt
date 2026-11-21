@@ -22,7 +22,8 @@ switches to the report type of the JSON you load.
 5. Use Box Zoom in the graph toolbar to draw one zoom rectangle. The graph then
    returns to pan mode automatically; Home restores the full view.
 6. Click a point to show the asset's details below the graph: for a mesh, the
-   materials it references and the textures they use; for a material, its
+   materials it references and the textures they use, with each texture's
+   resolution after Maximum Texture Size; for a material, its
    vertex factories and instances, followed by a colour-coded grid of every
    instance's base property overrides and static parameters. Under each
    parameter name, the yellow number counts instances that override it with
