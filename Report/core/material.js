@@ -13,9 +13,9 @@
     const usageStatuses = {
         usedNotEnabled: { label: "Used but not enabled", className: "used-not-enabled" },
         // Enabled with an empty users list. Users the report does not check, such as placed actors, may still exist.
-        enabledUnused: { label: "No users found", className: "enabled-unused" },
+        enabledUnused: { label: "No users found", className: "unknown" },
         ok: { label: "Flags match users", className: "ok" },
-        noneFound: { label: "No users found", className: "enabled-unused" },
+        noneFound: { label: "No users found", className: "unknown" },
         notChecked: { label: "Not checked", className: "unknown" }
     };
 
