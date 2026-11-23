@@ -12,7 +12,8 @@
     // Usage status of one vertex factory, shown in the vertex factory table.
     const usageStatuses = {
         usedNotEnabled: { label: "Used but not enabled", className: "used-not-enabled" },
-        enabledUnused: { label: "Enabled but unused", className: "enabled-unused" },
+        // Enabled with an empty users list. Users the report does not check, such as placed actors, may still exist.
+        enabledUnused: { label: "No users found", className: "enabled-unused" },
         ok: { label: "Flags match users", className: "ok" },
         noneFound: { label: "No users found", className: "enabled-unused" },
         notChecked: { label: "Not checked", className: "unknown" }
