@@ -20,6 +20,7 @@
     const chart = document.getElementById("chart");
     const selectedAssetLabel = document.getElementById("selected-asset-label");
     const selectedAssetText = document.getElementById("selected-asset");
+    const selectedAssetPath = document.getElementById("selected-asset-path");
     const bridgeStatus = document.getElementById("bridge-status");
     const showInContentBrowserButton = document.getElementById("show-in-content-browser");
     const xAxisSelect = document.getElementById("x-axis");
@@ -706,9 +707,12 @@
         const assetName = asset.AssetName || `Unnamed ${activeType.noun}`;
         const packagePath = asset.PackagePath ?? "";
         selectedAsset = { assetName, packagePath };
-        selectedAssetText.textContent = `${assetName} — ${packagePath}`;
+        selectedAssetText.textContent = assetName;
+        selectedAssetPath.textContent = packagePath;
+        selectedAssetPath.title = packagePath;
+        // The status line stays empty until Show in Content Browser is clicked.
         bridgeStatus.classList.remove("error");
-        bridgeStatus.textContent = "Ready to send to Unreal Editor.";
+        bridgeStatus.textContent = "";
         showInContentBrowserButton.disabled = packagePath === "";
         skippedPanel.hidden = true;
         renderDetails(asset, fromSkippedList);
@@ -720,6 +724,8 @@
         selectedAssetText.textContent = skippedRows.length > 0
             ? `Click a point in the graph or a ${activeType.noun} in the not-plotted list.`
             : "Click a point in the graph.";
+        selectedAssetPath.textContent = "";
+        selectedAssetPath.title = "";
         bridgeStatus.classList.remove("error");
         bridgeStatus.textContent = "";
         showInContentBrowserButton.disabled = true;
