@@ -50,9 +50,7 @@
         { key: "UsersKnown", label: "Users Known", type: "string", filter: true,
             value: material => anyMaterialHasUsers ? (hasUsers(material) ? "Yes" : "No") : undefined },
         { key: "EnabledUsageFlags", label: "Enabled Usage Flags", type: "number", axis: true,
-            value: material => material.UsageFlagsRead ? summarizeUsage(material).enabledCount : undefined },
-        { key: "EnabledUnusedFlags", label: "Enabled but Unused Flags", type: "number", axis: true,
-            value: material => material.UsageFlagsRead ? summarizeUsage(material).enabledUnusedCount : undefined },
+            value: material => material.UsageFlagsRead ? countEnabledUsageFlags(material) : undefined },
         { key: "PackagePath", label: "Package Path", type: "string", filter: true,
             value: material => material.PackagePath }
     ];
@@ -323,19 +321,9 @@
         return usageStatuses.notChecked;
     }
 
-    // Counts the enabled usage flags of a material, and those enabled without any user.
-    function summarizeUsage(material) {
-        let enabledCount = 0;
-        let enabledUnusedCount = 0;
-        Object.values(material.VertexFactories ?? {}).forEach(entry => {
-            if (entry.Enabled === true) {
-                enabledCount += 1;
-            }
-            if (entryStatus(entry) === usageStatuses.enabledUnused) {
-                enabledUnusedCount += 1;
-            }
-        });
-        return { enabledCount, enabledUnusedCount };
+    // Counts the enabled usage flags of a material.
+    function countEnabledUsageFlags(material) {
+        return Object.values(material.VertexFactories ?? {}).filter(entry => entry.Enabled === true).length;
     }
 
     function splitHeader(header) {
@@ -349,13 +337,12 @@
     function renderDetails(material, panel, ui) {
         const summary = document.createElement("div");
         summary.className = "details-summary";
-        const usage = summarizeUsage(material);
         if (typeof material.PackageDiskSize === "number") {
             ui.addSummaryItem(summary, "Disk size", ui.formatBytes(material.PackageDiskSize));
         }
         ui.addNumberItem(summary, "Instances", material.InstanceCount);
         if (material.UsageFlagsRead === true) {
-            ui.addSummaryItem(summary, "Enabled usage flags", usage.enabledCount.toLocaleString());
+            ui.addSummaryItem(summary, "Enabled usage flags", countEnabledUsageFlags(material).toLocaleString());
         }
         ui.addNumberItem(summary, "Shader count (layout estimate)", material.ShaderCount);        const cooked = cookedByMaterial.get(material);
         if (cooked) {
