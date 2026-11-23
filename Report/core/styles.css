@@ -580,7 +580,6 @@ h1 {
 }
 
 .status-pill.used-not-enabled { background: #4a1f24; color: #ff9a9a; }
-.status-pill.enabled-unused { background: #4a3a1a; color: #ffd27a; }
 .status-pill.ok { background: #183a2c; color: #7be0b0; }
 .status-pill.unknown { background: #252c34; color: #9ba4ae; }
 
