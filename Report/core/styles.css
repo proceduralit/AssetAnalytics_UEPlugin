@@ -358,6 +358,15 @@ h1 {
     margin-top: 3px;
 }
 
+/* Package path of the selected asset, under its name. Takes no space while nothing is selected. */
+.asset-action small.asset-path {
+    min-height: 0;
+    overflow: hidden;
+    font-size: 0.85em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .asset-action small.error {
     color: #ff8f8f;
 }
