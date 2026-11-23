@@ -521,6 +521,11 @@ h1 {
     color: #dce2e8;
 }
 
+/* The summary opens the details panel, so the panel's padding is enough space above it. */
+.details-summary:first-child {
+    margin-top: 0;
+}
+
 .details-summary b {
     color: #9ba4ae;
     font-weight: 500;
