@@ -807,13 +807,7 @@
             detailsPanel.append(backButton);
         }
 
-        const title = document.createElement("h2");
-        title.textContent = asset.AssetName ?? `Unnamed ${activeType.noun}`;
-        const path = document.createElement("p");
-        path.className = "details-path";
-        path.textContent = asset.PackagePath ?? "";
-        detailsPanel.append(title, path);
-
+        // The asset's name and path are shown in the selected asset header above, so the panel starts with its details.
         activeType.renderDetails(asset, detailsPanel, detailsHelpers);
         detailsPanel.hidden = false;
     }
